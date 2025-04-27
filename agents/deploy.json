@@ -1,7 +1,7 @@
 {
   "service_name": "sample-agents-service",
   "allow_unauthenticated": false,
-  "service_account": "your-cloud-run-sa@${google_project.agents_project.project_id}.iam.gserviceaccount.com",
+  "service_account": "cloud-run-agent-sa@poc-ai-agents-project.iam.gserviceaccount.com",
   "invokers": [
     "allAuthenticatedUsers"
   ],
