@@ -54,6 +54,7 @@ jobs:
               - 'pyproject.toml'
               - 'poetry.lock'
               - 'agents/**'
+              - 'Dockerfile' # Add Dockerfile to python changes
             terraform:
               - 'terraform/**'
 
