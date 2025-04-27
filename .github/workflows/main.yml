@@ -165,7 +165,7 @@ jobs:
           echo "Building and pushing image: $IMAGE_TAG"
 
           # Use Cloud Build to build and push the image from the root Dockerfile
-          gcloud builds submit . --tag="$IMAGE_TAG" --project="$GOOGLE_CLOUD_PROJECT"
+          gcloud builds submit . --tag="$IMAGE_TAG" --project="$GOOGLE_CLOUD_PROJECT" --verbosity=debug
 
           # Optionally, output the image tag for the next step (though we reconstruct it)
           # echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
