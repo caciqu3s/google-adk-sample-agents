@@ -81,7 +81,7 @@ jobs:
         run: pipx install poetry
 
       - name: Install dependencies
-        run: poetry install
+        run: poetry install --no-root
 
       # Add your test and lint steps here
       # - name: Run tests
