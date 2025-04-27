@@ -42,7 +42,6 @@ env/
 .terraform.lock.hcl
 *.tfstate
 *.tfstate.*
-terraform.tfvars
 # Ignore override files as they are usually environment-specific
 override.tf
 override.tf.json

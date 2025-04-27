@@ -56,18 +56,18 @@ The ADK web interface provides a convenient way to test and debug the agents. Yo
 
 ## Deployment (GCP with Terraform)
 
-This project includes Terraform configuration to deploy the agents as a service on Google Cloud Platform (GCP), likely using Cloud Run.
+This project includes Terraform configuration to deploy necessary infrastructure and optionally the agents as services on Google Cloud Platform (GCP). Terraform is configured to create a dedicated Service Account and Workload Identity Federation pool/provider for secure authentication from the GitHub Actions CI/CD pipeline.
 
 **Prerequisites:**
 
 1.  **Terraform:** Install Terraform (https://developer.hashicorp.com/terraform/install).
-2.  **Google Cloud SDK (`gcloud`):** Install the gcloud CLI (https://cloud.google.com/sdk/docs/install) and authenticate:
+2.  **Google Cloud SDK (`gcloud`):** Install the gcloud CLI (https://cloud.google.com/sdk/docs/install) and authenticate with user credentials that have permissions to create projects (if needed), manage IAM, enable APIs, and manage the resources defined in `terraform/main.tf` (Service Accounts, WIF, Cloud SQL, GCS, Secret Manager, etc.). This is especially important for the *initial* apply.
     ```bash
     gcloud auth login
     gcloud auth application-default login
     ```
-3.  **GCP Project:** Have a GCP project created with billing enabled. Ensure the necessary APIs are enabled (e.g., Cloud Run API, Cloud Build API, Artifact Registry API, Secret Manager API). You might need to enable them manually or Terraform might prompt you.
-4.  **Permissions:** Ensure the authenticated user or service account has sufficient permissions (e.g., Cloud Run Admin, Secret Manager Admin, Artifact Registry Admin, Service Account User) in the target GCP project.
+3.  **GCP Project & Billing:** Have a GCP project ID and an associated Billing Account ID ready. Terraform can create the project if it doesn't exist, or use an existing one.
+4.  **GitHub Repository:** Know your GitHub repository name in the format `owner/repo-name`.
 
 **Deployment Steps:**
 
@@ -82,30 +82,49 @@ This project includes Terraform configuration to deploy the agents as a service 
     ```
 
 3.  **Configure Variables:**
-    *   Create a `terraform.tfvars` file in the `terraform` directory.
-    *   Define the required variables in this file. Essential variables typically include:
+    *   Create a `terraform.tfvars` file in the `terraform` directory (copy from `terraform.tfvars.example` if provided, or create new).
+    *   Define the required variables. Check `terraform/variables.tf` for the full list and descriptions. Key variables include:
         ```hcl
-        project_id = "your-gcp-project-id"
-        region     = "your-gcp-region"  # e.g., "us-central1"
+        project_id       = "your-gcp-project-id"
+        region           = "your-gcp-region"        # e.g., "us-central1"
+        billing_account  = "your-billing-account-id"
+        org_id           = "your-organization-id"   # Optional: Only if creating project in an org
+        github_repo      = "your-github-owner/your-repo-name" # For WIF binding
         
-        # You might need other variables depending on the specific Terraform configuration.
-        # Check terraform/variables.tf for a complete list.
+        # API Keys - Note: These are NOT directly used by Terraform yet.
+        # See CI/CD setup section for handling keys.
+        # google_api_key        = "YOUR_GEMINI_API_KEY"
+        # google_maps_api_key = "YOUR_MAPS_API_KEY"
+        # ticketmaster_api_key  = "YOUR_TICKETMASTER_KEY"
         ```
-    *   **Important:** Do not commit `terraform.tfvars` to version control if it contains sensitive information. Add it to your `.gitignore` if not already present.
+    *   **Important:** Ensure `terraform.tfvars` is in your `.gitignore`.
 
 4.  **Plan the Deployment:**
     ```bash
     terraform plan -var-file="terraform.tfvars"
     ```
-    Review the plan to see the resources Terraform will create.
+    Review the plan, especially the first time, to see the IAM roles and WIF resources being created.
 
-5.  **Apply the Deployment:**
+5.  **Apply the Deployment (Initial & Subsequent):**
     ```bash
     terraform apply -var-file="terraform.tfvars"
     ```
-    Type `yes` when prompted to confirm.
+    *   The **first time** you run `apply`, you must use your own authenticated gcloud user credentials. This creates the Service Account and WIF resources needed by the CI/CD pipeline.
+    *   Subsequent applies can be run manually or via the CI/CD pipeline (which will use the created SA).
+    *   Type `yes` when prompted to confirm.
 
-6.  **Access the Service:** Terraform will output the URL of the deployed Cloud Run service upon successful completion.
+6.  **Configure GitHub Secrets:**
+    *   After the first successful `terraform apply`, get the outputs:
+        ```bash
+        terraform output
+        ```
+    *   Create/Update the following secrets in your GitHub repository (`Settings` > `Secrets and variables` > `Actions`):
+        *   `GCP_PROJECT_ID`: Set to your `project_id`.
+        *   `GCP_REGION`: Set to your `region`.
+        *   `GCP_SA_EMAIL`: Use the value from the `github_actions_service_account_email` Terraform output.
+        *   `WIF_PROVIDER`: Use the value from the `workload_identity_provider_name` Terraform output.
+        *   `TF_VAR_project_id`, `TF_VAR_region`, `TF_VAR_billing_account`, `TF_VAR_org_id`: Set these to match your `terraform.tfvars` values (needed by the Terraform plan/apply steps in the workflow).
+        *   `GOOGLE_API_KEY`, `GOOGLE_MAPS_API_KEY`, `TICKETMASTER_API_KEY` (if needed): Add your actual API keys here. **Note:** These are used directly by the `adk deploy` step in the current CI/CD workflow. For better security, modify the Terraform code to store these in Secret Manager and update the Cloud Run service definition (either via Terraform or within the `adk deploy` step if it supports secret mounting) to use Secret Manager.
 
 **Destroying Infrastructure:**
 

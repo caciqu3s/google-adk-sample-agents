@@ -1,0 +1,224 @@
+name: Python and Terraform CI/CD
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '**/*.py'
+      - 'pyproject.toml'
+      - 'poetry.lock'
+      - 'agents/**' # Catch agent-related files
+      - 'terraform/**'
+      - '.github/workflows/ci-cd.yml'
+
+  push:
+    branches:
+      - main
+    paths:
+      - '**/*.py'
+      - 'pyproject.toml'
+      - 'poetry.lock'
+      - 'agents/**'
+      - 'terraform/**'
+      - '.github/workflows/ci-cd.yml'
+
+# Required for google-github-actions/auth using Workload Identity Federation
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      python_changed: ${{ steps.changes.outputs.python_changed }}
+      terraform_changed: ${{ steps.changes.outputs.terraform_changed }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetch history for diffing on push events
+
+      - name: Get changed files
+        id: changed_files
+        uses: tj-actions/changed-files@v44 # Use a specific version
+        with:
+          files_yaml: |
+            python:
+              - '**/*.py'
+              - 'pyproject.toml'
+              - 'poetry.lock'
+              - 'agents/**'
+            terraform:
+              - 'terraform/**'
+
+      - name: Determine changed areas
+        id: changes
+        run: |
+          echo "python_changed=${{ steps.changed_files.outputs.python_any_changed }}" >> $GITHUB_OUTPUT
+          echo "terraform_changed=${{ steps.changed_files.outputs.terraform_any_changed }}" >> $GITHUB_OUTPUT
+
+  python-pr-check:
+    needs: check-changes
+    if: github.event_name == 'pull_request' && needs.check-changes.outputs.python_changed == 'true' && needs.check-changes.outputs.terraform_changed == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13' # Match your project's required version
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Install dependencies
+        run: poetry install
+
+      # Add your test and lint steps here
+      # - name: Run tests
+      #   run: poetry run pytest tests/
+
+      # - name: Run linter
+      #   run: poetry run ruff check .
+
+      - name: Placeholder Test/Lint
+        run: echo "Python Build/Test checks would run here."
+
+  terraform-pr-plan:
+    needs: check-changes
+    if: github.event_name == 'pull_request' && needs.check-changes.outputs.terraform_changed == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./terraform
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.0" # Or your desired version
+
+      - name: Terraform Init
+        id: init
+        run: terraform init
+
+      - name: Terraform Validate
+        id: validate
+        run: terraform validate -no-color
+
+      - name: Terraform Plan
+        id: plan
+        run: terraform plan -no-color -input=false
+
+      # Optional: Add step to comment plan output on the PR
+
+  deploy-python-agents:
+    needs: check-changes
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.check-changes.outputs.python_changed == 'true'
+    runs-on: ubuntu-latest
+    environment: production # Optional: Define a GitHub environment for protection rules
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+
+      - name: Set up gcloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install Poetry
+        run: pipx install poetry
+
+      - name: Install ADK & Dependencies (needed for adk deploy)
+        run: poetry install --only main # Install only main deps for deployment
+
+      - name: Deploy Agents
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+          GOOGLE_CLOUD_LOCATION: ${{ secrets.GCP_REGION }}
+          # Set API keys in the environment for ADK/Agents to potentially pick up
+          # WARNING: This relies on agent code reading env vars OR adk deploy configuring them.
+          # A better long-term solution is using Secret Manager managed by Terraform.
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
+          TICKETMASTER_API_KEY: ${{ secrets.TICKETMASTER_API_KEY }}
+        run: |
+          # Activate poetry env for adk command
+          source $(poetry env info --path)/bin/activate
+
+          echo "Deploying agents to Cloud Run..."
+          for agent_dir in agents/*/; do
+            if [ -d "$agent_dir" ]; then
+              agent_name=$(basename "$agent_dir")
+              service_name="${agent_name//_/-}-service" # Replace underscores for service name
+              agent_path="./${agent_dir%/}" # Remove trailing slash
+
+              echo "Deploying agent from $agent_path as service $service_name..."
+              # NOTE: Assumes the authenticated service account has necessary permissions
+              # NOTE: --with_ui deploys the web interface. Remove if not needed.
+              # NOTE: Environment variable handling relies on ADK/Agent implementation or manual config.
+              #       Ideally, configure Cloud Run service to pull from Secret Manager (managed by Terraform).
+              adk deploy cloud_run \
+                --agent_path "$agent_path" \
+                --service-name "$service_name" \
+                --project "$GOOGLE_CLOUD_PROJECT" \
+                --region "$GOOGLE_CLOUD_LOCATION" \
+                --with_ui \
+                --allow-unauthenticated # Remove if auth is required
+            fi
+          done
+
+  deploy-terraform:
+    needs: check-changes
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.check-changes.outputs.terraform_changed == 'true'
+    runs-on: ubuntu-latest
+    environment: production # Optional: Define a GitHub environment for protection rules
+    defaults:
+      run:
+        working-directory: ./terraform
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.6.0" # Or your desired version
+
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Apply
+        run: terraform apply -auto-approve -input=false
