@@ -67,6 +67,7 @@ jobs:
     needs: check-changes
     if: github.event_name == 'pull_request' && needs.check-changes.outputs.python_changed == 'true' && needs.check-changes.outputs.terraform_changed == 'false'
     runs-on: ubuntu-latest
+    environment: production
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -96,6 +97,7 @@ jobs:
     needs: check-changes
     if: github.event_name == 'pull_request' && needs.check-changes.outputs.terraform_changed == 'true'
     runs-on: ubuntu-latest
+    environment: production
     defaults:
       run:
         working-directory: ./terraform

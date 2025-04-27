@@ -56,6 +56,15 @@ resource "google_project_service" "storage" {
   disable_on_destroy = false
 }
 
+resource "google_project_service" "cloudbilling" {
+  project = google_project.agents_project.project_id
+  service = "cloudbilling.googleapis.com"
+
+  # Depend on core services being enabled
+  depends_on = [google_project_service.service_usage, google_project_service.resource_manager]
+  disable_on_destroy = false # Keep enabled unless project is destroyed
+}
+
 resource "google_storage_bucket" "tfstate_bucket" {
   project       = google_project.agents_project.project_id
   name          = "poc-ai-agents-tfstate-bucket"
@@ -151,7 +160,11 @@ resource "google_project_iam_member" "github_actions_sa_roles" {
     "roles/cloudbuild.builds.editor",    # ADK deploy often uses Cloud Build
     "roles/secretmanager.admin",         # Manage secrets (TF + potentially ADK)
     "roles/storage.admin",               # Manage GCS buckets (TF state, potentially others)
-    "roles/serviceusage.serviceUsageAdmin" # Enable APIs (TF)
+    # "roles/sqladmin.admin",           # Removed: Not needed for SA, TF handles SQL admin
+    "roles/serviceusage.serviceUsageAdmin", # Enable APIs (TF)
+    "roles/iam.workloadIdentityPoolViewer", # Allow SA to read WIF pool state for Terraform refresh
+    "roles/iam.securityReviewer",          # Allow SA to read IAM policies (e.g., its own) for Terraform refresh
+    "roles/cloudsql.viewer"              # Allow SA to read Cloud SQL instance state for Terraform refresh
   ])
   project = google_project.agents_project.project_id
   role    = each.value
@@ -169,6 +182,16 @@ resource "google_project_iam_member" "github_actions_sa_roles" {
     # Add dependencies for APIs used by specific roles if needed
     # e.g., google_project_service.run, google_project_service.artifactregistry
   ]
+}
+
+# Grant Billing Viewer role ON THE BILLING ACCOUNT
+resource "google_billing_account_iam_member" "github_actions_sa_billing_viewer" {
+  billing_account_id = var.billing_account
+  role               = "roles/billing.viewer"
+  member             = "serviceAccount:${google_service_account.github_actions_sa.email}"
+
+  # Depends on the SA existing
+  depends_on = [google_service_account.github_actions_sa]
 }
 
 # Workload Identity Federation Pool
