@@ -160,7 +160,9 @@ resource "google_project_iam_member" "github_actions_sa_roles" {
     "roles/cloudbuild.builds.editor",    # ADK deploy often uses Cloud Build
     "roles/secretmanager.admin",         # Manage secrets (TF + potentially ADK)
     "roles/storage.admin",               # Manage GCS buckets (TF state, potentially others)
-    "roles/serviceusage.serviceUsageAdmin" # Enable APIs (TF)
+    # "roles/sqladmin.admin",           # Removed: Not needed for SA, TF handles SQL admin
+    "roles/serviceusage.serviceUsageAdmin", # Enable APIs (TF)
+    "roles/iam.workloadIdentityPoolViewer" # Allow SA to read WIF pool state for Terraform refresh
   ])
   project = google_project.agents_project.project_id
   role    = each.value
