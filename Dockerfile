@@ -37,7 +37,8 @@ RUN pip install --no-cache-dir --upgrade pip && \
 RUN adduser --disabled-password --gecos "" myuser
 
 # Copy the main application file and the agents directory into the container
-COPY main.py .
+# Assumes main.py is inside the agents directory in the build context
+COPY agents/main.py .
 COPY agents/ /app/agents/
 
 # Set ownership for the app directory
