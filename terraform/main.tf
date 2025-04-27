@@ -65,6 +65,33 @@ resource "google_project_service" "cloudbilling" {
   disable_on_destroy = false # Keep enabled unless project is destroyed
 }
 
+resource "google_project_service" "networkmanagement" {
+  project = google_project.agents_project.project_id
+  service = "networkmanagement.googleapis.com"
+
+  # Depend on core services being enabled
+  depends_on = [google_project_service.service_usage, google_project_service.resource_manager]
+  disable_on_destroy = false # Keep enabled unless project is destroyed
+}
+
+# --- AI/ML APIs ---
+
+resource "google_project_service" "vertex_ai" {
+  project = google_project.agents_project.project_id
+  service = "aiplatform.googleapis.com"
+
+  depends_on = [google_project_service.service_usage, google_project_service.resource_manager]
+  disable_on_destroy = false
+}
+
+resource "google_project_service" "generative_language" {
+  project = google_project.agents_project.project_id
+  service = "generativelanguage.googleapis.com"
+
+  depends_on = [google_project_service.service_usage, google_project_service.resource_manager]
+  disable_on_destroy = false
+}
+
 resource "google_storage_bucket" "tfstate_bucket" {
   project       = google_project.agents_project.project_id
   name          = "poc-ai-agents-tfstate-bucket"
@@ -101,6 +128,34 @@ resource "google_secret_manager_secret_version" "db_password_secret_version" {
   secret_data = random_password.db_password.result
 }
 
+resource "random_password" "agent_db_password" {
+  length           = 16
+  special          = true
+  override_special = "_%@"
+}
+
+resource "google_secret_manager_secret" "agent_db_password_secret" {
+  project   = google_project.agents_project.project_id
+  secret_id = "agent-db-password"
+
+  replication {
+    user_managed {
+      replicas {
+        location = var.region
+      }
+    }
+  }
+
+  depends_on = [google_project_service.secretmanager]
+}
+
+resource "google_secret_manager_secret_version" "agent_db_password_secret_version" {
+  secret      = google_secret_manager_secret.agent_db_password_secret.id
+  secret_data = random_password.agent_db_password.result
+
+  depends_on = [google_secret_manager_secret.agent_db_password_secret]
+}
+
 resource "google_sql_database_instance" "main_instance" {
   project          = google_project.agents_project.project_id
   name             = "main-instance"
@@ -114,8 +169,13 @@ resource "google_sql_database_instance" "main_instance" {
 
     ip_configuration {
       ipv4_enabled = true
+      ssl_mode     = "ENCRYPTED_ONLY"
       # Consider using private IP for production:
       # private_network = google_compute_network.private_network.id
+      authorized_networks {
+        value = "189.29.149.20/32"
+        name  = "local-dev-ip"
+      }
     }
 
     backup_configuration {
@@ -137,6 +197,21 @@ resource "google_sql_user" "db_user" {
   instance = google_sql_database_instance.main_instance.name
   name     = "db_user"
   password = random_password.db_password.result
+}
+
+# --- Agent SQL User ---
+
+resource "google_sql_user" "agent_db_user" {
+  project  = google_project.agents_project.project_id
+  instance = google_sql_database_instance.main_instance.name
+  name     = "agent_user" # Or your desired username
+  password = random_password.agent_db_password.result
+
+  # Depends on the instance existing and the password being generated/stored
+  depends_on = [
+    google_sql_database_instance.main_instance,
+    google_secret_manager_secret_version.agent_db_password_secret_version
+  ]
 }
 
 # --- GitHub Actions Service Account and Workload Identity Federation ---
@@ -247,3 +322,137 @@ resource "google_service_account_iam_member" "github_actions_wif_binding" {
     google_iam_workload_identity_pool_provider.github_provider
   ]
 }
+
+# --- Cloud SQL Managed Client SSL Certificates ---
+
+# Create a Cloud SQL managed SSL certificate for db_user
+resource "google_sql_ssl_cert" "db_user_cert" {
+  project     = google_project.agents_project.project_id
+  instance    = google_sql_database_instance.main_instance.name
+  common_name = "db_user" # Can be any identifier, often match user
+
+  depends_on = [google_sql_database_instance.main_instance]
+}
+
+# Create a Cloud SQL managed SSL certificate for agent_user
+resource "google_sql_ssl_cert" "agent_user_cert" {
+  project     = google_project.agents_project.project_id
+  instance    = google_sql_database_instance.main_instance.name
+  common_name = "agent_user" # Can be any identifier, often match user
+
+  depends_on = [google_sql_database_instance.main_instance]
+}
+
+# --- Store Cloud SQL Managed SSL Certificates in Secret Manager ---
+
+# Secret for the Server CA Certificate (Provided by Cloud SQL)
+resource "google_secret_manager_secret" "sql_server_ca_cert" {
+  project   = google_project.agents_project.project_id
+  secret_id = "sql-server-ca-cert" # Keep the same name for consistency
+
+  replication {
+    user_managed {
+      replicas {
+        location = var.region
+      }
+    }
+  }
+  depends_on = [google_project_service.secretmanager]
+}
+
+resource "google_secret_manager_secret_version" "sql_server_ca_cert_version" {
+  secret      = google_secret_manager_secret.sql_server_ca_cert.id
+  # Use the server_ca_cert output from one of the certs (it's the same for the instance)
+  secret_data = google_sql_ssl_cert.agent_user_cert.server_ca_cert
+  depends_on  = [google_sql_ssl_cert.agent_user_cert] # Depends on cert creation
+}
+
+# --- Secrets for db_user (Cloud SQL Managed Cert) ---
+
+# Secret for db_user Client Certificate
+resource "google_secret_manager_secret" "sql_client_cert_db_user" {
+  project   = google_project.agents_project.project_id
+  secret_id = "sql-client-cert-db-user" # Keep the same name
+
+  replication {
+    user_managed {
+      replicas {
+        location = var.region
+      }
+    }
+  }
+  depends_on = [google_project_service.secretmanager]
+}
+
+resource "google_secret_manager_secret_version" "sql_client_cert_db_user_version" {
+  secret      = google_secret_manager_secret.sql_client_cert_db_user.id
+  secret_data = google_sql_ssl_cert.db_user_cert.cert
+  depends_on  = [google_sql_ssl_cert.db_user_cert]
+}
+
+# Secret for db_user Client Private Key
+resource "google_secret_manager_secret" "sql_client_key_db_user" {
+  project   = google_project.agents_project.project_id
+  secret_id = "sql-client-key-db-user" # Keep the same name
+
+  replication {
+    user_managed {
+      replicas {
+        location = var.region
+      }
+    }
+  }
+  depends_on = [google_project_service.secretmanager]
+}
+
+resource "google_secret_manager_secret_version" "sql_client_key_db_user_version" {
+  secret      = google_secret_manager_secret.sql_client_key_db_user.id
+  secret_data = google_sql_ssl_cert.db_user_cert.private_key
+  depends_on  = [google_sql_ssl_cert.db_user_cert]
+}
+
+# --- Secrets for agent_user (Cloud SQL Managed Cert) ---
+
+# Secret for agent_user Client Certificate
+resource "google_secret_manager_secret" "sql_client_cert_agent_user" {
+  project   = google_project.agents_project.project_id
+  secret_id = "sql-client-cert-agent-user" # Keep the same name
+
+  replication {
+    user_managed {
+      replicas {
+        location = var.region
+      }
+    }
+  }
+  depends_on = [google_project_service.secretmanager]
+}
+
+resource "google_secret_manager_secret_version" "sql_client_cert_agent_user_version" {
+  secret      = google_secret_manager_secret.sql_client_cert_agent_user.id
+  secret_data = google_sql_ssl_cert.agent_user_cert.cert
+  depends_on  = [google_sql_ssl_cert.agent_user_cert]
+}
+
+# Secret for agent_user Client Private Key
+resource "google_secret_manager_secret" "sql_client_key_agent_user" {
+  project   = google_project.agents_project.project_id
+  secret_id = "sql-client-key-agent-user" # Keep the same name
+
+  replication {
+    user_managed {
+      replicas {
+        location = var.region
+      }
+    }
+  }
+  depends_on = [google_project_service.secretmanager]
+}
+
+resource "google_secret_manager_secret_version" "sql_client_key_agent_user_version" {
+  secret      = google_secret_manager_secret.sql_client_key_agent_user.id
+  secret_data = google_sql_ssl_cert.agent_user_cert.private_key
+  depends_on  = [google_sql_ssl_cert.agent_user_cert]
+}
+
+# --- End of Cloud SQL SSL/Secret Manager Additions ---

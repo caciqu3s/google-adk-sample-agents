@@ -14,7 +14,10 @@ dependencies = [
     "requests (>=2.31.0)",
     "ticketpy (>=1.1.2)",
     "pytz (>=2024.1)",
-    "pillow (>=10.2.0)"
+    "pillow (>=10.2.0)",
+    "google-cloud-secret-manager (>=2.23.3,<3.0.0)",
+    "psycopg[binary] (>=3.2.6,<4.0.0)",
+    "cloud-sql-python-connector[pg8000] (>=1.18.1,<2.0.0)"
 ]
 
 

@@ -65,7 +65,7 @@ jobs:
 
   python-pr-check:
     needs: check-changes
-    if: github.event_name == 'pull_request' && needs.check-changes.outputs.python_changed == 'true' && needs.check-changes.outputs.terraform_changed == 'false'
+    if: github.event_name == 'pull_request' && needs.check-changes.outputs.python_changed == 'true'
     runs-on: ubuntu-latest
     environment: production
     steps:
@@ -81,7 +81,7 @@ jobs:
         run: pipx install poetry
 
       - name: Install dependencies
-        run: poetry install
+        run: poetry install --no-root
 
       # Add your test and lint steps here
       # - name: Run tests
@@ -149,52 +149,89 @@ jobs:
       - name: Set up gcloud SDK
         uses: google-github-actions/setup-gcloud@v2
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.13'
+      - name: Install jq (for reading deploy.json)
+        run: sudo apt-get update && sudo apt-get install -y jq
 
-      - name: Install Poetry
-        run: pipx install poetry
-
-      - name: Install ADK & Dependencies (needed for adk deploy)
-        run: poetry install --only main # Install only main deps for deployment
-
-      - name: Deploy Agents
+      - name: Deploy Agents using gcloud
         env:
           GOOGLE_CLOUD_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
           GOOGLE_CLOUD_LOCATION: ${{ secrets.GCP_REGION }}
-          # Set API keys in the environment for ADK/Agents to potentially pick up
-          # WARNING: This relies on agent code reading env vars OR adk deploy configuring them.
-          # A better long-term solution is using Secret Manager managed by Terraform.
-          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
-          GOOGLE_MAPS_API_KEY: ${{ secrets.GOOGLE_MAPS_API_KEY }}
-          TICKETMASTER_API_KEY: ${{ secrets.TICKETMASTER_API_KEY }}
         run: |
-          # Activate poetry env for adk command
-          source $(poetry env info --path)/bin/activate
+          echo "Deploying single agent service to Cloud Run using gcloud..."
 
-          echo "Deploying agents to Cloud Run..."
-          for agent_dir in agents/*/; do
-            if [ -d "$agent_dir" ]; then
-              agent_name=$(basename "$agent_dir")
-              service_name="${agent_name//_/-}-service" # Replace underscores for service name
-              agent_path="./${agent_dir%/}" # Remove trailing slash
+          # Construct the DB instance connection name once
+          DB_INSTANCE_CONNECTION_NAME="${GOOGLE_CLOUD_PROJECT}:${GOOGLE_CLOUD_LOCATION}:main-instance"
 
-              echo "Deploying agent from $agent_path as service $service_name..."
-              # NOTE: Assumes the authenticated service account has necessary permissions
-              # NOTE: --with_ui deploys the web interface. Remove if not needed.
-              # NOTE: Environment variable handling relies on ADK/Agent implementation or manual config.
-              #       Ideally, configure Cloud Run service to pull from Secret Manager (managed by Terraform).
-              adk deploy cloud_run \
-                --agent_path "$agent_path" \
-                --service-name "$service_name" \
-                --project "$GOOGLE_CLOUD_PROJECT" \
-                --region "$GOOGLE_CLOUD_LOCATION" \
-                --with_ui \
-                --allow-unauthenticated # Remove if auth is required
+          # Read the deployment config file
+          config_file="agents/deploy.json"
+          if [ ! -f "$config_file" ]; then
+             echo "Error: Deployment config file not found at $config_file"
+             exit 1
+          fi
+          config_json=$(cat "$config_file")
+
+          # NOTE: This assumes the root Dockerfile and main.py are suitable for the combined service.
+
+          # Get service name from the config
+          SERVICE_NAME=$(echo "$config_json" | jq -r '.service_name // ""' )
+
+          if [ -z "$SERVICE_NAME" ]; then
+            echo "Error: 'service_name' not found or empty in $config_file."
+            exit 1
+          fi
+
+          # Initialize ENV_VARS string only with Project and Location
+          ENV_VARS="GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}"
+          ENV_VARS+=",GOOGLE_CLOUD_LOCATION=$GOOGLE_CLOUD_LOCATION"
+
+          # Process env vars defined in the config
+          env_vars_json=$(echo "$config_json" | jq -c '.env_vars // []')
+
+          # Use process substitution and mapfile for safer parsing
+          mapfile -t env_items < <(echo "$env_vars_json" | jq -c '.[]')
+
+          for item_json in "${env_items[@]}"; do
+            var_name=$(echo "$item_json" | jq -r '.name')
+            plain_value=$(echo "$item_json" | jq -r '.value // ""' )
+            secret_name=$(echo "$item_json" | jq -r '.secret // ""' )
+            secret_version=$(echo "$item_json" | jq -r '.version // "latest"')
+
+            if [ -n "$secret_name" ]; then
+              # It's a secret reference
+              ENV_VARS+=",$var_name=secret:$secret_name:$secret_version"
+            elif [ -n "$plain_value" ] || [ "$var_name" = "DB_INSTANCE_CONNECTION_NAME" ]; then # Include placeholder
+              # It's a plain value or the placeholder
+              quoted_value=$(printf '%q' "$plain_value")
+              ENV_VARS+=",$var_name=$quoted_value"
             fi
           done
+
+          # Replace the placeholder with the actual constructed value
+          ENV_VARS=${ENV_VARS//__INSTANCE_CONNECTION_NAME_PLACEHOLDER__/$DB_INSTANCE_CONNECTION_NAME}
+
+          # Build the gcloud deploy command
+          deploy_cmd="gcloud run deploy \"$SERVICE_NAME\""
+          deploy_cmd+=" --source ." # Build from root Dockerfile
+          deploy_cmd+=" --project \"$GOOGLE_CLOUD_PROJECT\""
+          deploy_cmd+=" --region \"$GOOGLE_CLOUD_LOCATION\""
+          # Escape the ENV_VARS string for safe inclusion in the command
+          escaped_env_vars=$(printf '%q' "$ENV_VARS")
+          deploy_cmd+=" --set-env-vars=$escaped_env_vars"
+          deploy_cmd+=" --platform managed"
+
+          # Add --allow-unauthenticated flag based on deploy.json (if needed)
+          if [ "$(echo "$config_json" | jq -r '.allow_unauthenticated // false')" = "true" ]; then
+            deploy_cmd+=" --allow-unauthenticated"
+          fi
+
+          # Add --no-traffic flag based on deploy.json (optional, useful for blue/green)
+          if [ "$(echo "$config_json" | jq -r '.no_traffic // false')" = "true" ]; then
+             deploy_cmd+=" --no-traffic"
+          fi
+
+          echo "Executing deployment for $SERVICE_NAME..."
+          echo "Command: $deploy_cmd" # Print command for debugging
+          eval $deploy_cmd # Execute the built command
 
   deploy-terraform:
     needs: check-changes
