@@ -66,8 +66,9 @@ This project includes Terraform configuration to deploy necessary infrastructure
     gcloud auth login
     gcloud auth application-default login
     ```
-3.  **GCP Project & Billing:** Have a GCP project ID and an associated Billing Account ID ready. Terraform can create the project if it doesn't exist, or use an existing one.
+3.  **GCP Project & Billing:** Have a GCP project ID and an associated Billing Account ID ready. Terraform can create the project if it doesn't exist, or use an existing one. **Ensure the Cloud Billing API (`cloudbilling.googleapis.com`) is enabled for your project.** You can enable it in the GCP Console under "APIs & Services".
 4.  **GitHub Repository:** Know your GitHub repository name in the format `owner/repo-name`.
+5.  **Permissions for Initial Apply:** The user running the *initial* `terraform apply` needs permissions not only on the project but also **on the Billing Account** (e.g., `roles/billing.admin`) to grant the necessary viewer role to the GitHub Actions service account.
 
 **Deployment Steps:**
 
