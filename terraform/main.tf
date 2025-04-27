@@ -258,13 +258,15 @@ resource "google_project_iam_member" "github_actions_sa_roles" {
     "roles/artifactregistry.writer",     # Push container images (ADK deploy)
     "roles/artifactregistry.repoAdmin",  # Create Artifact Registry repos (needed for gcloud run deploy --source)
     "roles/cloudbuild.builds.editor",    # ADK deploy often uses Cloud Build (gcloud run deploy --source uses it too)
+    "roles/cloudbuild.builds.viewer",    # Allows viewing build details/logs via API
     "roles/secretmanager.admin",         # Manage secrets (TF + potentially ADK)
     "roles/storage.admin",               # Manage GCS buckets (TF state, potentially others)
     # "roles/sqladmin.admin",           # Removed: Not needed for SA, TF handles SQL admin
     "roles/serviceusage.serviceUsageAdmin", # Enable APIs (TF)
     "roles/iam.workloadIdentityPoolViewer", # Allow SA to read WIF pool state for Terraform refresh
     "roles/iam.securityReviewer",          # Allow SA to read IAM policies (e.g., its own) for Terraform refresh
-    "roles/cloudsql.viewer"              # Allow SA to read Cloud SQL instance state for Terraform refresh
+    "roles/cloudsql.viewer",              # Allow SA to read Cloud SQL instance state for Terraform refresh
+    "roles/logging.viewer"               # Allows viewing logs, including Cloud Build logs
   ])
   project = google_project.agents_project.project_id
   role    = each.value
@@ -282,7 +284,8 @@ resource "google_project_iam_member" "github_actions_sa_roles" {
     # Add dependencies for APIs used by specific roles if needed
     google_project_service.run_api,
     google_project_service.artifact_registry,
-    google_project_service.cloud_build
+    google_project_service.cloud_build,
+    # No specific API for logging, but depends on general enablement
   ]
 }
 
@@ -496,6 +499,52 @@ resource "google_secret_manager_secret_version" "sql_client_key_agent_user_versi
 }
 
 # --- End of Cloud SQL SSL/Secret Manager Additions ---
+
+# --- Cloud Run Service Account ---
+resource "google_service_account" "cloud_run_sa" {
+  project      = google_project.agents_project.project_id
+  account_id   = "cloud-run-agent-sa" # You can change this ID
+  display_name = "Service Account for Agent Cloud Run Service"
+  description  = "Used by the main agent Cloud Run service"
+
+  depends_on = [
+    google_project_service.iam # Ensure IAM API is enabled
+  ]
+}
+
+# --- Grant Roles to Cloud Run Service Account ---
+resource "google_project_iam_member" "cloud_run_sa_secret_accessor" {
+  project = google_project.agents_project.project_id
+  role    = "roles/secretmanager.secretAccessor"
+  member  = google_service_account.cloud_run_sa.member
+
+  depends_on = [
+    google_service_account.cloud_run_sa,
+    google_project_service.secretmanager
+  ]
+}
+
+resource "google_project_iam_member" "cloud_run_sa_sql_client" {
+  project = google_project.agents_project.project_id
+  role    = "roles/cloudsql.client"
+  member  = google_service_account.cloud_run_sa.member
+
+  depends_on = [
+    google_service_account.cloud_run_sa,
+    google_project_service.sqladmin
+  ]
+}
+
+resource "google_project_iam_member" "cloud_run_sa_ai_user" {
+  project = google_project.agents_project.project_id
+  role    = "roles/aiplatform.user" # Needed if using Vertex AI
+  member  = google_service_account.cloud_run_sa.member
+
+  depends_on = [
+    google_service_account.cloud_run_sa,
+    google_project_service.vertex_ai
+  ]
+}
 
 # --- Artifact Registry Repository for Agent Images ---
 resource "google_artifact_registry_repository" "agent_images_repo" {
