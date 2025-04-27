@@ -125,15 +125,6 @@ jobs:
       - name: Terraform Plan
         id: plan
         run: terraform plan -no-color -input=false
-        env:
-            # Pass required non-sensitive variables for plan
-            TF_VAR_project_id: ${{ secrets.TF_VAR_project_id }}
-            TF_VAR_region: ${{ secrets.TF_VAR_region }}
-            TF_VAR_billing_account: ${{ secrets.TF_VAR_billing_account }}
-            TF_VAR_org_id: ${{ secrets.TF_VAR_org_id }}
-            # NOTE: API key secrets are not strictly needed for plan unless
-            # Terraform uses them during the plan phase (e.g., data sources).
-            # They *will* be needed if/when Terraform manages these secrets.
 
       # Optional: Add step to comment plan output on the PR
 
