@@ -131,7 +131,7 @@ jobs:
       # Optional: Add step to comment plan output on the PR
 
   deploy-python-agents:
-    needs: check-changes
+    needs: [check-changes, deploy-terraform]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.check-changes.outputs.python_changed == 'true'
     runs-on: ubuntu-latest
     environment: production # Optional: Define a GitHub environment for protection rules
@@ -235,7 +235,7 @@ jobs:
 
   deploy-terraform:
     needs: check-changes
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.check-changes.outputs.terraform_changed == 'true'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: production # Optional: Define a GitHub environment for protection rules
     defaults:
