@@ -496,3 +496,16 @@ resource "google_secret_manager_secret_version" "sql_client_key_agent_user_versi
 }
 
 # --- End of Cloud SQL SSL/Secret Manager Additions ---
+
+# --- Artifact Registry Repository for Agent Images ---
+resource "google_artifact_registry_repository" "agent_images_repo" {
+  project       = google_project.agents_project.project_id
+  location      = var.region
+  repository_id = "agent-images" # The name of the repository
+  description   = "Docker repository for AI agent images"
+  format        = "DOCKER"
+
+  depends_on = [
+    google_project_service.artifact_registry # Ensure API is enabled first
+  ]
+}
