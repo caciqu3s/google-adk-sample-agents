@@ -92,6 +92,30 @@ resource "google_project_service" "generative_language" {
   disable_on_destroy = false
 }
 
+resource "google_project_service" "run_api" {
+  project = google_project.agents_project.project_id
+  service = "run.googleapis.com"
+
+  depends_on = [google_project_service.service_usage, google_project_service.resource_manager]
+  disable_on_destroy = false
+}
+
+resource "google_project_service" "artifact_registry" {
+  project = google_project.agents_project.project_id
+  service = "artifactregistry.googleapis.com"
+
+  depends_on = [google_project_service.service_usage, google_project_service.resource_manager]
+  disable_on_destroy = false
+}
+
+resource "google_project_service" "cloud_build" {
+  project = google_project.agents_project.project_id
+  service = "cloudbuild.googleapis.com" # gcloud run deploy --source uses Cloud Build
+
+  depends_on = [google_project_service.service_usage, google_project_service.resource_manager]
+  disable_on_destroy = false
+}
+
 resource "google_storage_bucket" "tfstate_bucket" {
   project       = google_project.agents_project.project_id
   name          = "poc-ai-agents-tfstate-bucket"
@@ -232,7 +256,8 @@ resource "google_project_iam_member" "github_actions_sa_roles" {
     "roles/run.admin",                   # Deploy Cloud Run services (ADK + TF if managing Run)
     "roles/iam.serviceAccountUser",      # Impersonate service accounts (itself for WIF)
     "roles/artifactregistry.writer",     # Push container images (ADK deploy)
-    "roles/cloudbuild.builds.editor",    # ADK deploy often uses Cloud Build
+    "roles/artifactregistry.repoAdmin",  # Create Artifact Registry repos (needed for gcloud run deploy --source)
+    "roles/cloudbuild.builds.editor",    # ADK deploy often uses Cloud Build (gcloud run deploy --source uses it too)
     "roles/secretmanager.admin",         # Manage secrets (TF + potentially ADK)
     "roles/storage.admin",               # Manage GCS buckets (TF state, potentially others)
     # "roles/sqladmin.admin",           # Removed: Not needed for SA, TF handles SQL admin
@@ -255,7 +280,9 @@ resource "google_project_iam_member" "github_actions_sa_roles" {
     google_project_service.secretmanager,
     google_project_service.storage,
     # Add dependencies for APIs used by specific roles if needed
-    # e.g., google_project_service.run, google_project_service.artifactregistry
+    google_project_service.run_api,
+    google_project_service.artifact_registry,
+    google_project_service.cloud_build
   ]
 }
 
