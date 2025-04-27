@@ -163,7 +163,8 @@ resource "google_project_iam_member" "github_actions_sa_roles" {
     # "roles/sqladmin.admin",           # Removed: Not needed for SA, TF handles SQL admin
     "roles/serviceusage.serviceUsageAdmin", # Enable APIs (TF)
     "roles/iam.workloadIdentityPoolViewer", # Allow SA to read WIF pool state for Terraform refresh
-    "roles/iam.securityReviewer"          # Allow SA to read IAM policies (e.g., its own) for Terraform refresh
+    "roles/iam.securityReviewer",          # Allow SA to read IAM policies (e.g., its own) for Terraform refresh
+    "roles/cloudsql.viewer"              # Allow SA to read Cloud SQL instance state for Terraform refresh
   ])
   project = google_project.agents_project.project_id
   role    = each.value
