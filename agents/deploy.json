@@ -1,6 +1,10 @@
 {
   "service_name": "sample-agents-service",
-  "allow_unauthenticated": true,
+  "allow_unauthenticated": false,
+  "service_account": "your-cloud-run-sa@${google_project.agents_project.project_id}.iam.gserviceaccount.com",
+  "invokers": [
+    "allAuthenticatedUsers"
+  ],
   "no_traffic": false,
   "env_vars": [
     { "name": "ENVIRONMENT", "value": "production" },

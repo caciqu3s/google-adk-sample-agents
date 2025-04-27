@@ -152,86 +152,166 @@ jobs:
       - name: Install jq (for reading deploy.json)
         run: sudo apt-get update && sudo apt-get install -y jq
 
+      - name: Build and Push Docker Image
+        id: build_image # Give the step an ID to reference its outputs if needed
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+          GOOGLE_CLOUD_LOCATION: ${{ secrets.GCP_REGION }}
+          REPO_NAME: "agent-images" # Matches the Terraform resource
+          IMAGE_NAME: "agent-demo-app" # Base name for the image
+        run: |
+          IMAGE_TAG="${GOOGLE_CLOUD_LOCATION}-docker.pkg.dev/${GOOGLE_CLOUD_PROJECT}/${REPO_NAME}/${IMAGE_NAME}:${{ github.sha }}"
+          echo "Building and pushing image: $IMAGE_TAG"
+
+          # Use Cloud Build to build and push the image from the root Dockerfile
+          gcloud builds submit . --tag="$IMAGE_TAG" --project="$GOOGLE_CLOUD_PROJECT"
+
+          # Optionally, output the image tag for the next step (though we reconstruct it)
+          # echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+
       - name: Deploy Agents using gcloud
+        id: deploy # Give deploy step an ID
+        env:
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+          GOOGLE_CLOUD_LOCATION: ${{ secrets.GCP_REGION }}
+          REPO_NAME: "agent-images" # Matches the Terraform resource
+          IMAGE_NAME: "agent-demo-app" # Base name for the image
+          IMAGE_TAG: "${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/agent-images/agent-demo-app:${{ github.sha }}"
+        run: |
+          echo "Deploying single agent service to Cloud Run using gcloud..."
+ 
+           # Construct the DB instance connection name once
+           DB_INSTANCE_CONNECTION_NAME="${GOOGLE_CLOUD_PROJECT}:${GOOGLE_CLOUD_LOCATION}:main-instance"
+ 
+           # Read the deployment config file
+           config_file="agents/deploy.json"
+           if [ ! -f "$config_file" ]; then
+              echo "Error: Deployment config file not found at $config_file"
+              exit 1
+           fi
+           config_json=$(cat "$config_file")
+ 
+           # NOTE: This assumes the root Dockerfile and main.py are suitable for the combined service.
+ 
+           # Get service name, SA, and flags from the config
+           SERVICE_NAME=$(echo "$config_json" | jq -r '.service_name // ""' )
+           SERVICE_ACCOUNT=$(echo "$config_json" | jq -r '.service_account // ""' )
+           ALLOW_UNAUTH=$(echo "$config_json" | jq -r '.allow_unauthenticated // false')
+           NO_TRAFFIC=$(echo "$config_json" | jq -r '.no_traffic // false')
+ 
+           if [ -z "$SERVICE_NAME" ]; then
+             echo "Error: 'service_name' not found or empty in $config_file."
+             exit 1
+           fi
+ 
+           # Initialize ENV_VARS string only with Project and Location
+           ENV_VARS="GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}"
+           ENV_VARS+=",GOOGLE_CLOUD_LOCATION=$GOOGLE_CLOUD_LOCATION"
+ 
+           # Process env vars defined in the config
+           env_vars_json=$(echo "$config_json" | jq -c '.env_vars // []')
+ 
+           # Use process substitution and mapfile for safer parsing
+           mapfile -t env_items < <(echo "$env_vars_json" | jq -c '.[]')
+ 
+           for item_json in "${env_items[@]}"; do
+             var_name=$(echo "$item_json" | jq -r '.name')
+             plain_value=$(echo "$item_json" | jq -r '.value // ""' )
+             secret_name=$(echo "$item_json" | jq -r '.secret // ""' )
+             secret_version=$(echo "$item_json" | jq -r '.version // "latest"')
+ 
+             if [ -n "$secret_name" ]; then
+               # It's a secret reference
+               ENV_VARS+=",$var_name=secret:$secret_name:$secret_version"
+             elif [ -n "$plain_value" ] || [ "$var_name" = "DB_INSTANCE_CONNECTION_NAME" ]; then # Include placeholder
+               # It's a plain value or the placeholder
+               quoted_value=$(printf '%q' "$plain_value")
+               ENV_VARS+=",$var_name=$quoted_value"
+             fi
+           done
+ 
+           # Replace the placeholder with the actual constructed value
+           ENV_VARS=${ENV_VARS//__INSTANCE_CONNECTION_NAME_PLACEHOLDER__/$DB_INSTANCE_CONNECTION_NAME}
+ 
+           # Construct the full image tag
+           # IMAGE_TAG="${GOOGLE_CLOUD_LOCATION}-docker.pkg.dev/${GOOGLE_CLOUD_PROJECT}/${REPO_NAME}/${IMAGE_NAME}:${{ github.sha }}"
+ 
+           # Build the gcloud deploy command
+           deploy_cmd="gcloud run deploy \"$SERVICE_NAME\""
+           deploy_cmd+=" --image $IMAGE_TAG"
+           deploy_cmd+=" --project \"$GOOGLE_CLOUD_PROJECT\""
+           deploy_cmd+=" --region \"$GOOGLE_CLOUD_LOCATION\""
+           # Add Service Account if specified
+           if [ -n "$SERVICE_ACCOUNT" ]; then
+              # Ensure SA email is quoted properly if it contains special chars (less likely for email)
+              quoted_sa=$(printf '%q' "$SERVICE_ACCOUNT")
+              deploy_cmd+=" --service-account=$quoted_sa"
+           fi
+           # Escape the ENV_VARS string for safe inclusion in the command
+           escaped_env_vars=$(printf '%q' "$ENV_VARS")
+           deploy_cmd+=" --set-env-vars=$escaped_env_vars"
+           deploy_cmd+=" --platform managed"
+
+           # Handle Invocation Permissions
+           if [ "$ALLOW_UNAUTH" = "true" ]; then
+             deploy_cmd+=" --allow-unauthenticated"
+           else
+              # If not allowing unauthenticated, ensure the flag is NOT present
+              # gcloud deploy defaults to private if --allow-unauthenticated is absent
+              echo "Service will be deployed as private."
+           fi
+
+           # Handle --no-traffic flag
+           if [ "$NO_TRAFFIC" = "true" ]; then
+              deploy_cmd+=" --no-traffic"
+           fi
+
+           echo "Executing deployment for $SERVICE_NAME..."
+           echo "Command: $deploy_cmd" # Print command for debugging
+           eval $deploy_cmd # Execute the built command
+
+      - name: Set Invoker Permissions (if private)
+        # Run only if deployment succeeded and allow_unauthenticated is false
+        if: steps.deploy.outcome == 'success'
         env:
           GOOGLE_CLOUD_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
           GOOGLE_CLOUD_LOCATION: ${{ secrets.GCP_REGION }}
         run: |
-          echo "Deploying single agent service to Cloud Run using gcloud..."
-
-          # Construct the DB instance connection name once
-          DB_INSTANCE_CONNECTION_NAME="${GOOGLE_CLOUD_PROJECT}:${GOOGLE_CLOUD_LOCATION}:main-instance"
-
-          # Read the deployment config file
+          echo "Setting invoker permissions..."
           config_file="agents/deploy.json"
-          if [ ! -f "$config_file" ]; then
-             echo "Error: Deployment config file not found at $config_file"
-             exit 1
-          fi
           config_json=$(cat "$config_file")
-
-          # NOTE: This assumes the root Dockerfile and main.py are suitable for the combined service.
-
-          # Get service name from the config
           SERVICE_NAME=$(echo "$config_json" | jq -r '.service_name // ""' )
+          ALLOW_UNAUTH=$(echo "$config_json" | jq -r '.allow_unauthenticated // false')
 
-          if [ -z "$SERVICE_NAME" ]; then
-            echo "Error: 'service_name' not found or empty in $config_file."
-            exit 1
+          if [ "$ALLOW_UNAUTH" = "true" ]; then
+            echo "Skipping invoker permissions: Service is public (--allow-unauthenticated was used)."
+            exit 0
           fi
 
-          # Initialize ENV_VARS string only with Project and Location
-          ENV_VARS="GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}"
-          ENV_VARS+=",GOOGLE_CLOUD_LOCATION=$GOOGLE_CLOUD_LOCATION"
+          invokers_json=$(echo "$config_json" | jq -c '.invokers // []')
+          mapfile -t invoker_list < <(echo "$invokers_json" | jq -r '.[]')
 
-          # Process env vars defined in the config
-          env_vars_json=$(echo "$config_json" | jq -c '.env_vars // []')
+          if [ ${#invoker_list[@]} -eq 0 ]; then
+             echo "No specific invokers listed in deploy.json for private service $SERVICE_NAME."
+             exit 0
+          fi
 
-          # Use process substitution and mapfile for safer parsing
-          mapfile -t env_items < <(echo "$env_vars_json" | jq -c '.[]')
-
-          for item_json in "${env_items[@]}"; do
-            var_name=$(echo "$item_json" | jq -r '.name')
-            plain_value=$(echo "$item_json" | jq -r '.value // ""' )
-            secret_name=$(echo "$item_json" | jq -r '.secret // ""' )
-            secret_version=$(echo "$item_json" | jq -r '.version // "latest"')
-
-            if [ -n "$secret_name" ]; then
-              # It's a secret reference
-              ENV_VARS+=",$var_name=secret:$secret_name:$secret_version"
-            elif [ -n "$plain_value" ] || [ "$var_name" = "DB_INSTANCE_CONNECTION_NAME" ]; then # Include placeholder
-              # It's a plain value or the placeholder
-              quoted_value=$(printf '%q' "$plain_value")
-              ENV_VARS+=",$var_name=$quoted_value"
+          echo "Granting invoke permissions to: ${invoker_list[*]}"
+          for invoker in "${invoker_list[@]}"; do
+            echo "Adding invoker: $invoker to $SERVICE_NAME"
+            # Use --condition=None to avoid unintended condition settings if any exist
+            gcloud run services add-iam-policy-binding "$SERVICE_NAME" \
+              --project="$GOOGLE_CLOUD_PROJECT" \
+              --region="$GOOGLE_CLOUD_LOCATION" \
+              --member="$invoker" \
+              --role="roles/run.invoker" \
+              --condition=None
+            if [ $? -ne 0 ]; then
+               echo "Warning: Failed to add invoker '$invoker'. It might already exist or there could be a permissions issue."
+               # Decide if you want to fail the job here or just warn
+               # exit 1
             fi
           done
-
-          # Replace the placeholder with the actual constructed value
-          ENV_VARS=${ENV_VARS//__INSTANCE_CONNECTION_NAME_PLACEHOLDER__/$DB_INSTANCE_CONNECTION_NAME}
-
-          # Build the gcloud deploy command
-          deploy_cmd="gcloud run deploy \"$SERVICE_NAME\""
-          deploy_cmd+=" --source ." # Build from root Dockerfile
-          deploy_cmd+=" --project \"$GOOGLE_CLOUD_PROJECT\""
-          deploy_cmd+=" --region \"$GOOGLE_CLOUD_LOCATION\""
-          # Escape the ENV_VARS string for safe inclusion in the command
-          escaped_env_vars=$(printf '%q' "$ENV_VARS")
-          deploy_cmd+=" --set-env-vars=$escaped_env_vars"
-          deploy_cmd+=" --platform managed"
-
-          # Add --allow-unauthenticated flag based on deploy.json (if needed)
-          if [ "$(echo "$config_json" | jq -r '.allow_unauthenticated // false')" = "true" ]; then
-            deploy_cmd+=" --allow-unauthenticated"
-          fi
-
-          # Add --no-traffic flag based on deploy.json (optional, useful for blue/green)
-          if [ "$(echo "$config_json" | jq -r '.no_traffic // false')" = "true" ]; then
-             deploy_cmd+=" --no-traffic"
-          fi
-
-          echo "Executing deployment for $SERVICE_NAME..."
-          echo "Command: $deploy_cmd" # Print command for debugging
-          eval $deploy_cmd # Execute the built command
 
   deploy-terraform:
     needs: check-changes
