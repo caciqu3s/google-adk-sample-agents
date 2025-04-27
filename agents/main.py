@@ -126,16 +126,6 @@ def close_db_connector():
 async def shutdown_event():
     close_db_connector()
 
-# Alternative using atexit if needed, but FastAPI shutdown event is preferred
-# import atexit
-# atexit.register(close_db_connector)
-
-# You can add more FastAPI routes or configurations below if needed
-# Example:
-# @app.get("/hello")
-# async def read_root():
-#     return {"Hello": "World"}
-
 if __name__ == "__main__":
     # Use the PORT environment variable provided by Cloud Run, defaulting to 8080
     port = int(os.environ.get("PORT", 8080))

@@ -286,6 +286,19 @@ resource "google_project_iam_member" "github_actions_sa_roles" {
   ]
 }
 
+# --- Grant Project IAM Admin Role to SA ---
+# This is necessary for the SA to manage its own roles via Terraform
+resource "google_project_iam_member" "github_actions_sa_project_iam_admin" {
+  project = google_project.agents_project.project_id
+  role    = "roles/resourcemanager.projectIamAdmin"
+  member  = "serviceAccount:${google_service_account.github_actions_sa.email}"
+
+  depends_on = [
+    google_service_account.github_actions_sa,
+    google_project_service.resource_manager # Ensure Resource Manager API is enabled
+  ]
+}
+
 # Grant Billing Viewer role ON THE BILLING ACCOUNT
 resource "google_billing_account_iam_member" "github_actions_sa_billing_viewer" {
   billing_account_id = var.billing_account
