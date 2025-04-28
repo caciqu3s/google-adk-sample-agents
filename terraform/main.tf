@@ -249,6 +249,7 @@ resource "google_service_account" "github_actions_sa" {
   ]
 }
 
+# Grant roles necessary for Terraform Apply AND Cloud Build/Deploy
 # Grant roles necessary for Terraform Apply AND ADK Deploy
 # Adjust these based on the exact needs of your TF config and agents
 resource "google_project_iam_member" "github_actions_sa_roles" {
@@ -261,7 +262,8 @@ resource "google_project_iam_member" "github_actions_sa_roles" {
     "roles/cloudbuild.builds.viewer",    # Allows viewing build details/logs via API
     "roles/secretmanager.admin",         # Manage secrets (TF + potentially ADK)
     "roles/storage.admin",               # Manage GCS buckets (TF state, potentially others)
-    # "roles/sqladmin.admin",           # Removed: Not needed for SA, TF handles SQL admin
+    "roles/storage.objectViewer",        # Needed by SA to read Cloud Build logs from GCS bucket
+    # "roles/sqladmin.admin",           # Not needed for SA, TF handles SQL admin
     "roles/serviceusage.serviceUsageAdmin", # Enable APIs (TF)
     "roles/iam.workloadIdentityPoolViewer", # Allow SA to read WIF pool state for Terraform refresh
     "roles/iam.securityReviewer",          # Allow SA to read IAM policies (e.g., its own) for Terraform refresh
