@@ -11,8 +11,12 @@
     { "name": "GOOGLE_GENAI_USE_VERTEXAI", "value": "True" },
     { "name": "DB_USER", "value": "agent_user" },
     { "name": "DB_NAME", "value": "main_db" },
-    { "name": "DB_INSTANCE_CONNECTION_NAME", "value": "poc-ai-agents-project:us-central1:main-db-instance" },
-    { "name": "DB_PASSWORD", "secret": "agent-db-password" },
+    { "name": "DB_HOST_PROD", "value": "35.239.103.220" },
+    { "name": "DB_PORT_PROD", "value": "5432" },
+    { "name": "DB_PASSWORD", "secret": "agent-db-password", "version": "latest" },
+    { "name": "DB_SSL_SERVER_CA_SECRET", "secret": "sql-server-ca-cert", "version": "latest" },
+    { "name": "DB_SSL_CLIENT_CERT_SECRET", "secret": "sql-client-cert-agent-user", "version": "latest" },
+    { "name": "DB_SSL_CLIENT_KEY_SECRET", "secret": "sql-client-key-agent-user", "version": "latest" },
     { "name": "TICKETMASTER_API_KEY", "secret": "ticketmaster-api-key", "version": "latest" },
     { "name": "GOOGLE_MAPS_API_KEY", "secret": "google-maps-api-key", "version": "latest" }
   ]
