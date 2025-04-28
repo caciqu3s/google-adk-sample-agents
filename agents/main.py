@@ -3,7 +3,8 @@ import urllib.parse
 import sqlalchemy
 import tempfile
 import atexit
-from google.cloud import secretmanager
+# Remove or comment out if no longer needed elsewhere
+# from google.cloud import secretmanager
 
 import uvicorn
 from fastapi import FastAPI
@@ -39,70 +40,62 @@ atexit.register(_cleanup_temp_files)
 if ENVIRONMENT == "production":
     print("Configuring for PRODUCTION environment using psycopg and SSL...")
     # --- Production Database Connection (Cloud SQL via psycopg + SSL) ---
+    # In Cloud Run with --set-secrets, env vars contain the actual secret values.
     DB_USER = os.environ.get("DB_USER")
-    DB_PASSWORD = os.environ.get("DB_PASSWORD")
-    DB_HOST_PROD = os.environ.get("DB_HOST_PROD") # Private IP or DNS of Cloud SQL
+    DB_PASSWORD = os.environ.get("DB_PASSWORD") # Value injected by Cloud Run
+    DB_HOST_PROD = os.environ.get("DB_HOST_PROD")
     DB_PORT_PROD = os.environ.get("DB_PORT_PROD", "5432")
     DB_NAME = os.environ.get("DB_NAME")
 
-    # Secrets for SSL certificates in Secret Manager (full resource names)
-    # e.g., projects/your-project-id/secrets/db-server-ca/versions/latest
-    DB_SSL_SERVER_CA_SECRET = os.environ.get("DB_SSL_SERVER_CA_SECRET")
-    DB_SSL_CLIENT_CERT_SECRET = os.environ.get("DB_SSL_CLIENT_CERT_SECRET")
-    DB_SSL_CLIENT_KEY_SECRET = os.environ.get("DB_SSL_CLIENT_KEY_SECRET")
+    # Get SSL cert content directly from env vars (injected by Cloud Run --set-secrets)
+    server_ca_data_str = os.environ.get("DB_SSL_SERVER_CA_SECRET")
+    client_cert_data_str = os.environ.get("DB_SSL_CLIENT_CERT_SECRET")
+    client_key_data_str = os.environ.get("DB_SSL_CLIENT_KEY_SECRET")
 
     required_vars = [
         DB_USER, DB_PASSWORD, DB_HOST_PROD, DB_NAME,
-        DB_SSL_SERVER_CA_SECRET, DB_SSL_CLIENT_CERT_SECRET, DB_SSL_CLIENT_KEY_SECRET
+        server_ca_data_str, client_cert_data_str, client_key_data_str
     ]
 
     if not all(required_vars):
-        raise ValueError("Missing required environment variables for production: "
-                         "DB_USER, DB_PASSWORD, DB_HOST_PROD, DB_NAME, "
-                         "DB_SSL_SERVER_CA_SECRET, DB_SSL_CLIENT_CERT_SECRET, DB_SSL_CLIENT_KEY_SECRET")
+        # Improved error message
+        missing = [name for name, var in zip([
+            "DB_USER", "DB_PASSWORD", "DB_HOST_PROD", "DB_NAME",
+            "DB_SSL_SERVER_CA_SECRET", "DB_SSL_CLIENT_CERT_SECRET", "DB_SSL_CLIENT_KEY_SECRET"
+            ], required_vars) if not var]
+        raise ValueError(f"Missing required environment variables for production: {', '.join(missing)}")
 
     try:
-        # Initialize Secret Manager client
-        print("Initializing Secret Manager client...")
-        secret_client = secretmanager.SecretManagerServiceClient()
+        # --- No need for Secret Manager client here when running in Cloud Run --- 
+        # Secrets are injected directly into environment variables.
 
-        def get_secret(secret_version_name: str) -> bytes:
-            """Fetches a secret version payload."""
-            print(f"Fetching secret: {secret_version_name}")
-            response = secret_client.access_secret_version(name=secret_version_name)
-            return response.payload.data
-
-        # Fetch secrets
-        server_ca_data = get_secret(DB_SSL_SERVER_CA_SECRET)
-        client_cert_data = get_secret(DB_SSL_CLIENT_CERT_SECRET)
-        client_key_data = get_secret(DB_SSL_CLIENT_KEY_SECRET)
-
-        # Create temporary files for certificates
-        print("Creating temporary files for SSL certificates...")
-        server_ca_file = tempfile.NamedTemporaryFile(delete=False, suffix="-server-ca.pem")
-        client_cert_file = tempfile.NamedTemporaryFile(delete=False, suffix="-client-cert.pem")
-        client_key_file = tempfile.NamedTemporaryFile(delete=False, suffix="-client-key.pem")
+        # Create temporary files for certificates from env var strings
+        print("Creating temporary files for SSL certificates from env vars...")
+        # Ensure writing in text mode ('w') as env vars are strings
+        server_ca_file = tempfile.NamedTemporaryFile(delete=False, suffix="-server-ca.pem", mode='w')
+        client_cert_file = tempfile.NamedTemporaryFile(delete=False, suffix="-client-cert.pem", mode='w')
+        client_key_file = tempfile.NamedTemporaryFile(delete=False, suffix="-client-key.pem", mode='w')
 
         # Store file objects for cleanup
         _temp_cert_files.extend([server_ca_file, client_cert_file, client_key_file])
 
-        # Write secret data to temp files
-        server_ca_file.write(server_ca_data)
+        # Write secret strings to temp files
+        server_ca_file.write(server_ca_data_str)
         server_ca_file.flush()
-        client_cert_file.write(client_cert_data)
+        client_cert_file.write(client_cert_data_str)
         client_cert_file.flush()
-        client_key_file.write(client_key_data)
+        client_key_file.write(client_key_data_str)
         client_key_file.flush()
 
         print(f"Server CA path: {server_ca_file.name}")
         print(f"Client Cert path: {client_cert_file.name}")
         print(f"Client Key path: {client_key_file.name}")
 
-        # Construct the connection string for psycopg with SSL
+        # Construct the connection string for psycopg with SSL using temp file paths
         encoded_password = urllib.parse.quote_plus(DB_PASSWORD)
         SESSION_DB_URL = (
             f"postgresql+psycopg://{DB_USER}:{encoded_password}@{DB_HOST_PROD}:{DB_PORT_PROD}/{DB_NAME}"
-            f"?sslmode=verify-ca"
+            f"?sslmode=verify-ca" # Using verify-ca is often needed with IP addresses
             f"&sslrootcert={server_ca_file.name}"
             f"&sslcert={client_cert_file.name}"
             f"&sslkey={client_key_file.name}"
