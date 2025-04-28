@@ -224,6 +224,7 @@ jobs:
            # Initialize ENV_VARS string only with Project and Location
            ENV_VARS="GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}"
            ENV_VARS+=",GOOGLE_CLOUD_LOCATION=$GOOGLE_CLOUD_LOCATION"
+           SECRET_VARS=""
  
            # Process env vars defined in the config
            env_vars_json=$(echo "$config_json" | jq -c '.env_vars // []')
@@ -231,6 +232,8 @@ jobs:
            # Use process substitution and mapfile for safer parsing
            mapfile -t env_items < <(echo "$env_vars_json" | jq -c '.[]')
  
+           first_env=true
+           first_secret=true
            for item_json in "${env_items[@]}"; do
              var_name=$(echo "$item_json" | jq -r '.name')
              plain_value=$(echo "$item_json" | jq -r '.value // ""' )
@@ -238,11 +241,20 @@ jobs:
              secret_version=$(echo "$item_json" | jq -r '.version // "latest"')
  
              if [ -n "$secret_name" ]; then
-               # It's a secret reference
-               ENV_VARS+=",$var_name=secret:$secret_name:$secret_version"
+               # It's a secret reference - add to SECRET_VARS
+               if [ "$first_secret" = true ]; then
+                 SECRET_VARS+="$var_name=$secret_name:$secret_version"
+                 first_secret=false
+               else
+                 SECRET_VARS+=",$var_name=$secret_name:$secret_version"
+               fi
              elif [ -n "$plain_value" ] || [ "$var_name" = "DB_INSTANCE_CONNECTION_NAME" ]; then # Include placeholder
-               # It's a plain value or the placeholder
+               # It's a plain value or the placeholder - add to ENV_VARS
                quoted_value=$(printf '%q' "$plain_value")
+               if [ "$first_env" = true ]; then
+                  # Already added project/location
+                  first_env=false
+               fi
                ENV_VARS+=",$var_name=$quoted_value"
              fi
            done
@@ -265,8 +277,15 @@ jobs:
               deploy_cmd+=" --service-account=$quoted_sa"
            fi
            # Escape the ENV_VARS string for safe inclusion in the command
-           escaped_env_vars=$(printf '%q' "$ENV_VARS")
-           deploy_cmd+=" --set-env-vars=$escaped_env_vars"
+           if [[ -n "$ENV_VARS" && "$ENV_VARS" != "GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT},GOOGLE_CLOUD_LOCATION=$GOOGLE_CLOUD_LOCATION" ]]; then # Check if non-default vars were added
+              escaped_env_vars=$(printf '%q' "$ENV_VARS")
+              deploy_cmd+=" --set-env-vars=$escaped_env_vars"
+           fi
+           # Add secrets if any were found
+           if [ -n "$SECRET_VARS" ]; then
+              escaped_secret_vars=$(printf '%q' "$SECRET_VARS")
+              deploy_cmd+=" --set-secrets=$escaped_secret_vars"
+           fi
            deploy_cmd+=" --platform managed"
 
            # Handle Invocation Permissions
