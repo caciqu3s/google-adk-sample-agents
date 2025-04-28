@@ -1,7 +1,9 @@
 import os
 import urllib.parse
 import sqlalchemy
-from google.cloud.sql.connector import Connector, IPTypes
+import tempfile
+import atexit
+from google.cloud import secretmanager
 
 import uvicorn
 from fastapi import FastAPI
@@ -11,75 +13,109 @@ from google.adk.sessions.database_session_service import DatabaseSessionService
 # Determine environment
 ENVIRONMENT = os.environ.get("ENVIRONMENT", "local").lower()
 
-# Initialize connector and engine globally, but configure based on environment
-db_connector: Connector | None = None
+# Initialize engine globally, will be configured based on environment
 db_engine: sqlalchemy.Engine | None = None
 
-SESSION_DB_URL = None # Keep this for ADK compatibility for now, but engine is primary
+SESSION_DB_URL = None # Keep this for ADK compatibility
+
+# List to keep track of temporary certificate files
+_temp_cert_files = []
+
+def _cleanup_temp_files():
+    """Cleans up temporary certificate files."""
+    global _temp_cert_files
+    for file in _temp_cert_files:
+        try:
+            print(f"Cleaning up temporary file: {file.name}")
+            file.close() # This also deletes the file due to delete=True
+        except Exception as e:
+            print(f"Error cleaning up temp file {getattr(file, 'name', 'unknown')}: {e}")
+    _temp_cert_files = []
+
+# Register the cleanup function to be called on program exit
+atexit.register(_cleanup_temp_files)
+
 
 if ENVIRONMENT == "production":
-    print("Configuring for PRODUCTION environment...")
-    # --- Production Database Connection (Cloud SQL via Connector) ---
-    DB_USER = os.environ.get("DB_USER") # e.g., agent_user (must be set in prod)
-    DB_PASSWORD = os.environ.get("DB_PASSWORD") # Must be set in prod
-    DB_INSTANCE_CONNECTION_NAME = os.environ.get("DB_INSTANCE_CONNECTION_NAME") # e.g. project:region:instance
-    DB_NAME = os.environ.get("DB_NAME")         # e.g., main_db (must be set in prod)
+    print("Configuring for PRODUCTION environment using psycopg and SSL...")
+    # --- Production Database Connection (Cloud SQL via psycopg + SSL) ---
+    DB_USER = os.environ.get("DB_USER")
+    DB_PASSWORD = os.environ.get("DB_PASSWORD")
+    DB_HOST_PROD = os.environ.get("DB_HOST_PROD") # Private IP or DNS of Cloud SQL
+    DB_PORT_PROD = os.environ.get("DB_PORT_PROD", "5432")
+    DB_NAME = os.environ.get("DB_NAME")
 
-    if not all([DB_USER, DB_PASSWORD, DB_INSTANCE_CONNECTION_NAME, DB_NAME]):
+    # Secrets for SSL certificates in Secret Manager (full resource names)
+    # e.g., projects/your-project-id/secrets/db-server-ca/versions/latest
+    DB_SSL_SERVER_CA_SECRET = os.environ.get("DB_SSL_SERVER_CA_SECRET")
+    DB_SSL_CLIENT_CERT_SECRET = os.environ.get("DB_SSL_CLIENT_CERT_SECRET")
+    DB_SSL_CLIENT_KEY_SECRET = os.environ.get("DB_SSL_CLIENT_KEY_SECRET")
+
+    required_vars = [
+        DB_USER, DB_PASSWORD, DB_HOST_PROD, DB_NAME,
+        DB_SSL_SERVER_CA_SECRET, DB_SSL_CLIENT_CERT_SECRET, DB_SSL_CLIENT_KEY_SECRET
+    ]
+
+    if not all(required_vars):
         raise ValueError("Missing required environment variables for production: "
-                         "DB_USER, DB_PASSWORD, DB_INSTANCE_CONNECTION_NAME, DB_NAME")
+                         "DB_USER, DB_PASSWORD, DB_HOST_PROD, DB_NAME, "
+                         "DB_SSL_SERVER_CA_SECRET, DB_SSL_CLIENT_CERT_SECRET, DB_SSL_CLIENT_KEY_SECRET")
 
     try:
-        # Initialize Cloud SQL Python Connector
-        # Uses Application Default Credentials (ADC) implicitly
-        # refresh_strategy="lazy" is recommended for Cloud Run/Functions
-        print("Initializing Cloud SQL Python Connector...")
-        db_connector = Connector(refresh_strategy="lazy")
+        # Initialize Secret Manager client
+        print("Initializing Secret Manager client...")
+        secret_client = secretmanager.SecretManagerServiceClient()
 
-        def getconn():
-            conn = db_connector.connect(
-                DB_INSTANCE_CONNECTION_NAME,
-                "pg8000", # Specify the driver
-                user=DB_USER,
-                password=DB_PASSWORD,
-                db=DB_NAME,
-                ip_type=IPTypes.PUBLIC # Or IPTypes.PRIVATE if using private IP
-            )
-            return conn
+        def get_secret(secret_version_name: str) -> bytes:
+            """Fetches a secret version payload."""
+            print(f"Fetching secret: {secret_version_name}")
+            response = secret_client.access_secret_version(name=secret_version_name)
+            return response.payload.data
 
-        # Create the SQLAlchemy engine using the connector
-        print(f"Creating SQLAlchemy engine for {DB_INSTANCE_CONNECTION_NAME}...")
-        # Note: The URL dialect needs to match the driver specified in getconn
-        db_engine = sqlalchemy.create_engine(
-            "postgresql+pg8000://",
-            creator=getconn,
-            pool_size=5, # Example pool configuration
-            max_overflow=2,
-            pool_timeout=30,
-            pool_recycle=1800,
+        # Fetch secrets
+        server_ca_data = get_secret(DB_SSL_SERVER_CA_SECRET)
+        client_cert_data = get_secret(DB_SSL_CLIENT_CERT_SECRET)
+        client_key_data = get_secret(DB_SSL_CLIENT_KEY_SECRET)
+
+        # Create temporary files for certificates
+        print("Creating temporary files for SSL certificates...")
+        server_ca_file = tempfile.NamedTemporaryFile(delete=False, suffix="-server-ca.pem")
+        client_cert_file = tempfile.NamedTemporaryFile(delete=False, suffix="-client-cert.pem")
+        client_key_file = tempfile.NamedTemporaryFile(delete=False, suffix="-client-key.pem")
+
+        # Store file objects for cleanup
+        _temp_cert_files.extend([server_ca_file, client_cert_file, client_key_file])
+
+        # Write secret data to temp files
+        server_ca_file.write(server_ca_data)
+        server_ca_file.flush()
+        client_cert_file.write(client_cert_data)
+        client_cert_file.flush()
+        client_key_file.write(client_key_data)
+        client_key_file.flush()
+
+        print(f"Server CA path: {server_ca_file.name}")
+        print(f"Client Cert path: {client_cert_file.name}")
+        print(f"Client Key path: {client_key_file.name}")
+
+        # Construct the connection string for psycopg with SSL
+        encoded_password = urllib.parse.quote_plus(DB_PASSWORD)
+        SESSION_DB_URL = (
+            f"postgresql+psycopg://{DB_USER}:{encoded_password}@{DB_HOST_PROD}:{DB_PORT_PROD}/{DB_NAME}"
+            f"?sslmode=verify-ca"
+            f"&sslrootcert={server_ca_file.name}"
+            f"&sslcert={client_cert_file.name}"
+            f"&sslkey={client_key_file.name}"
         )
 
-        # Test connection (optional but recommended)
-        try:
-            with db_engine.connect() as connection:
-                print("Successfully connected to the database via connector.")
-        except Exception as e:
-             print(f"Database connection test failed: {e}")
-             if db_connector:
-                 db_connector.close() # Ensure cleanup on failure
-             raise
-
-        # ADK expects a URL, even if we use the engine directly later.
-        # Construct a dummy URL for compatibility; it won't be used for the actual connection.
-        encoded_password = urllib.parse.quote_plus(DB_PASSWORD)
-        SESSION_DB_URL = f"postgresql+pg8000://{DB_USER}:{encoded_password}@/{DB_NAME}?host={DB_INSTANCE_CONNECTION_NAME}"
-        print(f"Using Cloud SQL DB: {DB_INSTANCE_CONNECTION_NAME} via Connector")
+        print(f"Using Cloud SQL DB: {DB_HOST_PROD} via psycopg with SSL")
+        # Let ADK create the engine from the URL
+        db_engine = None
 
     except Exception as e:
-        print(f"Failed to initialize DB connection using Cloud SQL Connector: {e}")
-        if db_connector:
-             db_connector.close() # Ensure cleanup on failure
-        raise # Reraise the exception to prevent starting the app with bad config
+        print(f"Failed to initialize DB connection using psycopg+SSL: {e}")
+        _cleanup_temp_files() # Attempt cleanup on failure
+        raise # Reraise the exception
 
 else:
     print("Configuring for LOCAL environment...")
@@ -92,8 +128,9 @@ else:
 
     # Construct the PostgreSQL connection string for local/compose
     SESSION_DB_URL = f"postgresql+psycopg://{DB_USER_LOCAL}:{DB_PASSWORD_LOCAL}@{DB_HOST_LOCAL}:{DB_PORT_LOCAL}/{DB_NAME_LOCAL}"
-    # For local, create engine directly from URL
-    db_engine = sqlalchemy.create_engine(SESSION_DB_URL)
+    # For local, create engine directly from URL if needed, or let ADK handle it
+    # db_engine = sqlalchemy.create_engine(SESSION_DB_URL) # ADK can handle this
+    db_engine = None # Let ADK handle engine creation from URL
     print(f"Using Local DB: {DB_HOST_LOCAL}")
 
 
@@ -107,24 +144,21 @@ ALLOWED_ORIGINS = ["http://localhost", "http://localhost:8080", "*"]
 SERVE_WEB_INTERFACE = True
 
 # Call the function to get the FastAPI app instance
-# Pass the engine if available (for production via connector), otherwise let ADK use the URL (for local)
+# Pass the engine if available (none needed now, ADK uses URL), otherwise let ADK use the URL
 app: FastAPI = get_fast_api_app(
     agent_dir=AGENT_DIR,
     session_db_url=SESSION_DB_URL, # Use the conditionally constructed URL
-    session_db_engine=db_engine, # Pass the engine created via connector or local URL
+    # session_db_engine=db_engine, # Remove: Let ADK create engine from URL
     allow_origins=ALLOWED_ORIGINS,
     web=SERVE_WEB_INTERFACE,
 )
 
-# --- Add cleanup hook for the connector ---
-def close_db_connector():
-    if db_connector:
-        print("Closing Cloud SQL Python Connector.")
-        db_connector.close()
+# --- Remove cleanup hook for the connector ---
+# No longer needed as connector is removed and temp files handled by atexit
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    close_db_connector()
+# @app.on_event("shutdown")
+# async def shutdown_event():
+#    pass # atexit handles temp file cleanup
 
 # Alternative using atexit if needed, but FastAPI shutdown event is preferred
 # import atexit
