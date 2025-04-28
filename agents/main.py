@@ -153,13 +153,6 @@ app: FastAPI = get_fast_api_app(
     web=SERVE_WEB_INTERFACE,
 )
 
-# --- Remove cleanup hook for the connector ---
-# No longer needed as connector is removed and temp files handled by atexit
-
-# @app.on_event("shutdown")
-# async def shutdown_event():
-#    pass # atexit handles temp file cleanup
-
 # Alternative using atexit if needed, but FastAPI shutdown event is preferred
 # import atexit
 # atexit.register(close_db_connector)
