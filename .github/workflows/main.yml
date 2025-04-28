@@ -153,21 +153,37 @@ jobs:
       - name: Install jq (for reading deploy.json)
         run: sudo apt-get update && sudo apt-get install -y jq
 
-      - name: Build and Push Docker Image
+      - name: Install Buildah
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y buildah
+
+      - name: Build and Push Docker Image using Buildah
         id: build_image # Give the step an ID to reference its outputs if needed
         env:
           GOOGLE_CLOUD_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
           GOOGLE_CLOUD_LOCATION: ${{ secrets.GCP_REGION }}
           REPO_NAME: "agent-images" # Matches the Terraform resource
           IMAGE_NAME: "agent-demo-app" # Base name for the image
+          # Construct Artifact Registry hostname
+          AR_HOSTNAME: "${{ secrets.GCP_REGION }}-docker.pkg.dev"
         run: |
-          IMAGE_TAG="${GOOGLE_CLOUD_LOCATION}-docker.pkg.dev/${GOOGLE_CLOUD_PROJECT}/${REPO_NAME}/${IMAGE_NAME}:${{ github.sha }}"
-          echo "Building and pushing image: $IMAGE_TAG"
+          IMAGE_TAG="${AR_HOSTNAME}/${GOOGLE_CLOUD_PROJECT}/${REPO_NAME}/${IMAGE_NAME}:${{ github.sha }}"
+          echo "Building and pushing image with Buildah: $IMAGE_TAG"
 
-          # Use Cloud Build to build and push the image from the root Dockerfile
-          gcloud builds submit . --tag="$IMAGE_TAG" --project="$GOOGLE_CLOUD_PROJECT" --verbosity=debug
+          # Login to Artifact Registry using gcloud access token
+          echo "Logging into ${AR_HOSTNAME}..."
+          gcloud auth print-access-token | buildah login -u oauth2accesstoken --password-stdin "https://${AR_HOSTNAME}"
 
-          # Optionally, output the image tag for the next step (though we reconstruct it)
+          # Build the image using Dockerfile in the root
+          echo "Building image..."
+          buildah bud --tag "$IMAGE_TAG" .
+
+          # Push the image
+          echo "Pushing image..."
+          buildah push "$IMAGE_TAG"
+
+          # Optional: output the image tag for the next step
           # echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
 
       - name: Deploy Agents using gcloud
