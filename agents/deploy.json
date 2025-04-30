@@ -13,6 +13,7 @@
     { "name": "DB_INSTANCE_CONNECTION_NAME", "value": "poc-ai-agents-project:us-central1:main-instance" },
     { "name": "DB_PASSWORD", "secret": "agent-db-password", "version": "latest" },
     { "name": "TICKETMASTER_API_KEY", "secret": "ticketmaster-api-key", "version": "latest" },
-    { "name": "GOOGLE_MAPS_API_KEY", "secret": "google-maps-api-key", "version": "latest" }
+    { "name": "GOOGLE_MAPS_API_KEY", "secret": "google-maps-api-key", "version": "latest" },
+    { "name": "ENVIRONMENT", "value": "production" }
   ]
 }
