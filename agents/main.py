@@ -85,11 +85,6 @@ else: # local
     )
     print(f"Using DB URL for ADK Session Service (Local): postgresql+psycopg://<user>:***@{DB_HOST_LOCAL}:{DB_PORT_LOCAL}/{DB_NAME_LOCAL}")
 
-
-# --- ADK Session Service Configuration (Handled by get_fast_api_app) ---
-# The DatabaseSessionService will be initialized internally by the ADK
-# using the session_db_url provided below.
-
 # --- FastAPI App Configuration ---
 
 _APP_DIR = os.path.dirname(os.path.abspath(__file__))
