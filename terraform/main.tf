@@ -40,6 +40,16 @@ resource "google_project_service" "sqladmin" {
   disable_on_destroy = false
 }
 
+# Enable the SQL Component API needed for Cloud Run integration (Unix socket)
+resource "google_project_service" "sql_component" {
+  project = google_project.agents_project.project_id
+  service = "sql-component.googleapis.com"
+
+  # Depends on the main SQL Admin API being enabled
+  depends_on = [google_project_service.sqladmin]
+  disable_on_destroy = false
+}
+
 resource "google_project_service" "secretmanager" {
   project = google_project.agents_project.project_id
   service = "secretmanager.googleapis.com"
