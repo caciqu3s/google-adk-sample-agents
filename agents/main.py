@@ -1,163 +1,127 @@
 import os
 import urllib.parse
-import sqlalchemy
-import tempfile
-import atexit
-# Remove or comment out if no longer needed elsewhere
-# from google.cloud import secretmanager
+import sqlalchemy # Keep for potential type hints
+
+# No Cloud SQL Connector imports needed for this approach
+# from google.cloud.sql.connector import Connector, IPTypes
 
 import uvicorn
 from fastapi import FastAPI
 from google.adk.cli.fast_api import get_fast_api_app
-from google.adk.sessions.database_session_service import DatabaseSessionService
 
-# Determine environment
+# --- Environment Configuration ---
 ENVIRONMENT = os.environ.get("ENVIRONMENT", "local").lower()
+print(f"Configuring for {ENVIRONMENT.upper()} environment...")
 
-# Initialize engine globally, will be configured based on environment
-db_engine: sqlalchemy.Engine | None = None
+# --- Database URL Configuration ---
+SESSION_DB_URL_FOR_SERVICE: str
+DB_USER = os.environ.get("DB_USER") # Used by production and production-local
+DB_PASSWORD = os.environ.get("DB_PASSWORD") # Used by production and production-local
+DB_NAME = os.environ.get("DB_NAME") # Used by production and production-local
 
-SESSION_DB_URL = None # Keep this for ADK compatibility
-
-# List to keep track of temporary certificate files
-_temp_cert_files = []
-
-def _cleanup_temp_files():
-    """Cleans up temporary certificate files."""
-    global _temp_cert_files
-    for file in _temp_cert_files:
-        try:
-            print(f"Cleaning up temporary file: {file.name}")
-            file.close() # This also deletes the file due to delete=True
-        except Exception as e:
-            print(f"Error cleaning up temp file {getattr(file, 'name', 'unknown')}: {e}")
-    _temp_cert_files = []
-
-# Register the cleanup function to be called on program exit
-atexit.register(_cleanup_temp_files)
-
+# Common check for production credentials
+if ENVIRONMENT.startswith("production"):
+    required_vars_prod = [DB_USER, DB_PASSWORD, DB_NAME]
+    if not all(required_vars_prod):
+        missing = [name for name, var in zip(
+            ["DB_USER", "DB_PASSWORD", "DB_NAME"], required_vars_prod
+            ) if not var]
+        raise ValueError(f"Missing required environment variables for {ENVIRONMENT} DB: {', '.join(missing)}")
 
 if ENVIRONMENT == "production":
-    print("Configuring for PRODUCTION environment using psycopg and SSL...")
-    # --- Production Database Connection (Cloud SQL via psycopg + SSL) ---
-    # In Cloud Run with --set-secrets, env vars contain the actual secret values.
-    DB_USER = os.environ.get("DB_USER")
-    DB_PASSWORD = os.environ.get("DB_PASSWORD") # Value injected by Cloud Run
-    DB_HOST_PROD = os.environ.get("DB_HOST_PROD")
-    DB_PORT_PROD = os.environ.get("DB_PORT_PROD", "5432")
-    DB_NAME = os.environ.get("DB_NAME")
+    # Production (Cloud Run): Connect via Cloud SQL Unix Socket
+    # Assumes Cloud Run service is configured with a Cloud SQL connection
+    # pointing the instance connection name to /cloudsql/
+    print("Using Cloud Run configuration: Connecting via Unix Socket")
+    INSTANCE_CONNECTION_NAME = os.environ.get("DB_INSTANCE_CONNECTION_NAME")
+    if not INSTANCE_CONNECTION_NAME:
+         raise ValueError("Missing required environment variable for production: DB_INSTANCE_CONNECTION_NAME")
 
-    # Get SSL cert content directly from env vars (injected by Cloud Run --set-secrets)
-    server_ca_data_str = os.environ.get("DB_SSL_SERVER_CA_SECRET")
-    client_cert_data_str = os.environ.get("DB_SSL_CLIENT_CERT_SECRET")
-    client_key_data_str = os.environ.get("DB_SSL_CLIENT_KEY_SECRET")
+    # Socket path format: /cloudsql/<INSTANCE_CONNECTION_NAME>/.s.PGSQL.5432
+    socket_path = f"/cloudsql/{INSTANCE_CONNECTION_NAME}/.s.PGSQL.5432"
 
-    required_vars = [
-        DB_USER, DB_PASSWORD, DB_HOST_PROD, DB_NAME,
-        server_ca_data_str, client_cert_data_str, client_key_data_str
-    ]
+    # URL Encode user/password
+    encoded_user = urllib.parse.quote_plus(DB_USER)
+    encoded_pass = urllib.parse.quote_plus(DB_PASSWORD)
 
-    if not all(required_vars):
-        # Improved error message
-        missing = [name for name, var in zip([
-            "DB_USER", "DB_PASSWORD", "DB_HOST_PROD", "DB_NAME",
-            "DB_SSL_SERVER_CA_SECRET", "DB_SSL_CLIENT_CERT_SECRET", "DB_SSL_CLIENT_KEY_SECRET"
-            ], required_vars) if not var]
-        raise ValueError(f"Missing required environment variables for production: {', '.join(missing)}")
+    # Use pg8000 driver with unix_sock query parameter
+    SESSION_DB_URL_FOR_SERVICE = (
+        f"postgresql+pg8000://{encoded_user}:{encoded_pass}@/{DB_NAME}"
+        f"?unix_sock={socket_path}"
+    )
+    print(f"Using DB URL for ADK Session Service (Cloud Run Unix Socket): postgresql+pg8000://<user>:***@/<db_name>?unix_sock=...")
 
-    try:
-        # --- No need for Secret Manager client here when running in Cloud Run --- 
-        # Secrets are injected directly into environment variables.
+elif ENVIRONMENT == "production-local":
+    # Production-Local (Docker Compose): Connect via Cloud SQL Auth Proxy service
+    print("Using Docker configuration: Connecting via Cloud SQL Auth Proxy")
+    proxy_host = "cloud-sql-proxy" # Docker service name
+    proxy_port = "5432"
 
-        # Create temporary files for certificates from env var strings
-        print("Creating temporary files for SSL certificates from env vars...")
-        # Ensure writing in text mode ('w') as env vars are strings
-        server_ca_file = tempfile.NamedTemporaryFile(delete=False, suffix="-server-ca.pem", mode='w')
-        client_cert_file = tempfile.NamedTemporaryFile(delete=False, suffix="-client-cert.pem", mode='w')
-        client_key_file = tempfile.NamedTemporaryFile(delete=False, suffix="-client-key.pem", mode='w')
+    # URL Encode user/password
+    encoded_user = urllib.parse.quote_plus(DB_USER)
+    encoded_pass = urllib.parse.quote_plus(DB_PASSWORD)
 
-        # Store file objects for cleanup
-        _temp_cert_files.extend([server_ca_file, client_cert_file, client_key_file])
+    # Use pg8000 driver for proxy connection URL
+    SESSION_DB_URL_FOR_SERVICE = (
+        f"postgresql+pg8000://{encoded_user}:{encoded_pass}"
+        f"@{proxy_host}:{proxy_port}/{DB_NAME}"
+    )
+    print(f"Using DB URL for ADK Session Service (via Proxy): postgresql+pg8000://<user>:***@{proxy_host}:{proxy_port}/{DB_NAME}")
 
-        # Write secret strings to temp files
-        server_ca_file.write(server_ca_data_str)
-        server_ca_file.flush()
-        client_cert_file.write(client_cert_data_str)
-        client_cert_file.flush()
-        client_key_file.write(client_key_data_str)
-        client_key_file.flush()
-
-        print(f"Server CA path: {server_ca_file.name}")
-        print(f"Client Cert path: {client_cert_file.name}")
-        print(f"Client Key path: {client_key_file.name}")
-
-        # Construct the connection string for psycopg with SSL using temp file paths
-        encoded_password = urllib.parse.quote_plus(DB_PASSWORD)
-        SESSION_DB_URL = (
-            f"postgresql+psycopg://{DB_USER}:{encoded_password}@{DB_HOST_PROD}:{DB_PORT_PROD}/{DB_NAME}"
-            f"?sslmode=verify-ca" # Using verify-ca is often needed with IP addresses
-            f"&sslrootcert={server_ca_file.name}"
-            f"&sslcert={client_cert_file.name}"
-            f"&sslkey={client_key_file.name}"
-        )
-
-        print(f"Using Cloud SQL DB: {DB_HOST_PROD} via psycopg with SSL")
-        # Let ADK create the engine from the URL
-        db_engine = None
-
-    except Exception as e:
-        print(f"Failed to initialize DB connection using psycopg+SSL: {e}")
-        _cleanup_temp_files() # Attempt cleanup on failure
-        raise # Reraise the exception
-
-else:
-    print("Configuring for LOCAL environment...")
-    # --- Local Database Connection --- 
+else: # local
+    # Local: Connect directly to a local DB service (e.g., another Docker container)
+    print("Using Local configuration: Connecting directly to local DB")
     DB_USER_LOCAL = os.environ.get("DB_USER_LOCAL", "postgres")
     DB_PASSWORD_LOCAL = os.environ.get("DB_PASSWORD_LOCAL", "password")
-    DB_HOST_LOCAL = os.environ.get("DB_HOST_LOCAL", "db") # Default to service name 'db' for compose
+    DB_HOST_LOCAL = os.environ.get("DB_HOST_LOCAL", "db") # Default Docker Compose service name
     DB_PORT_LOCAL = os.environ.get("DB_PORT_LOCAL", "5432")
     DB_NAME_LOCAL = os.environ.get("DB_NAME_LOCAL", "postgres")
 
-    # Construct the PostgreSQL connection string for local/compose
-    SESSION_DB_URL = f"postgresql+psycopg://{DB_USER_LOCAL}:{DB_PASSWORD_LOCAL}@{DB_HOST_LOCAL}:{DB_PORT_LOCAL}/{DB_NAME_LOCAL}"
-    # For local, create engine directly from URL if needed, or let ADK handle it
-    # db_engine = sqlalchemy.create_engine(SESSION_DB_URL) # ADK can handle this
-    db_engine = None # Let ADK handle engine creation from URL
-    print(f"Using Local DB: {DB_HOST_LOCAL}")
+    # URL Encode user/password
+    encoded_user = urllib.parse.quote_plus(DB_USER_LOCAL)
+    encoded_pass = urllib.parse.quote_plus(DB_PASSWORD_LOCAL)
 
+    # Use psycopg driver for direct local connection URL (or pg8000 if preferred/installed)
+    SESSION_DB_URL_FOR_SERVICE = (
+        f"postgresql+psycopg://{encoded_user}:{encoded_pass}"
+        f"@{DB_HOST_LOCAL}:{DB_PORT_LOCAL}/{DB_NAME_LOCAL}"
+    )
+    print(f"Using DB URL for ADK Session Service (Local): postgresql+psycopg://<user>:***@{DB_HOST_LOCAL}:{DB_PORT_LOCAL}/{DB_NAME_LOCAL}")
+
+
+# --- ADK Session Service Configuration (Handled by get_fast_api_app) ---
+# The DatabaseSessionService will be initialized internally by the ADK
+# using the session_db_url provided below.
 
 # --- FastAPI App Configuration ---
 
-# Get the directory where main.py is located
-AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
-# Example allowed origins for CORS
-ALLOWED_ORIGINS = ["http://localhost", "http://localhost:8080", "*"]
-# Set web=True if you intend to serve a web interface, False otherwise
-SERVE_WEB_INTERFACE = True
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+AGENT_DIR = os.path.join(_APP_DIR, "agents")
+print(f"ADK Agent Directory set to: {AGENT_DIR}")
 
-# Call the function to get the FastAPI app instance
-# Pass the engine if available (none needed now, ADK uses URL), otherwise let ADK use the URL
-app: FastAPI = get_fast_api_app(
-    agent_dir=AGENT_DIR,
-    session_db_url=SESSION_DB_URL, # Use the conditionally constructed URL
-    # session_db_engine=db_engine, # Remove: Let ADK create engine from URL
-    allow_origins=ALLOWED_ORIGINS,
-    web=SERVE_WEB_INTERFACE,
-)
+ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "*,http://localhost,http://localhost:8080").split(',')
+SERVE_WEB_INTERFACE = os.environ.get("SERVE_WEB_INTERFACE", "True").lower() == "true"
 
-# Alternative using atexit if needed, but FastAPI shutdown event is preferred
-# import atexit
-# atexit.register(close_db_connector)
+print(f"Allowed Origins: {ALLOWED_ORIGINS}")
+print(f"Serve Web Interface: {SERVE_WEB_INTERFACE}")
 
-# You can add more FastAPI routes or configurations below if needed
-# Example:
-# @app.get("/hello")
-# async def read_root():
-#     return {"Hello": "World"}
+try:
+    print("Initializing FastAPI app with ADK...")
+    app: FastAPI = get_fast_api_app(
+        agent_dir=AGENT_DIR,
+        session_db_url=SESSION_DB_URL_FOR_SERVICE, # ADK uses this to create DatabaseSessionService
+        allow_origins=ALLOWED_ORIGINS,
+        web=SERVE_WEB_INTERFACE,
+    )
+    print("FastAPI app initialized successfully.")
+except Exception as e:
+    print(f"Failed to initialize FastAPI app: {e}")
+    raise
 
+# --- Application Entry Point ---
 if __name__ == "__main__":
-    # Use the PORT environment variable provided by Cloud Run, defaulting to 8080
+    # Use the PORT environment variable provided by Cloud Run/Compose, defaulting to 8080
     port = int(os.environ.get("PORT", 8080))
-    print(f"Starting Uvicorn on 0.0.0.0:{port}")
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    host = os.environ.get("HOST", "0.0.0.0") # Listen on all interfaces by default
+    print(f"Starting Uvicorn server on {host}:{port}")
+    uvicorn.run(app, host=host, port=port)

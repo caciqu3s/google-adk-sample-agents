@@ -49,4 +49,3 @@ override.tf.json
 *_override.tf.json
 
 certs/
-docker-compose.yml

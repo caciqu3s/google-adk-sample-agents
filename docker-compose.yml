@@ -1,0 +1,86 @@
+version: '3.8'
+
+services:
+  cloud-sql-proxy:
+    image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.15.2 # Pinned version
+    container_name: cloud_sql_proxy
+    # Command to start the proxy.
+    # Added --address 0.0.0.0 to listen on all interfaces within the container network
+    # - `--credentials-file` uses the mounted ADC key.
+    # - `--structured-logs` for better logging format.
+    # - `--port 5432` makes it listen on the standard PG port inside the container.
+    # - The last argument is the instance connection name.
+    command: ["--address", "0.0.0.0", "--credentials-file", "/credentials/key.json", "--structured-logs", "--port", "5432", "poc-ai-agents-project:us-central1:main-instance"]
+    # security_context: # Removed - Not a valid top-level property in docker-compose
+    #  runAsNonRoot: true
+    restart: unless-stopped
+    volumes:
+      # Mount ADC credentials (same as agent)
+      # IMPORTANT: Ensure this path is correct on the host running Docker
+      - /Users/seberino/.config/gcloud/application_default_credentials.json:/credentials/key.json:ro
+    networks:
+      - agent-network
+    # Optional: Add resource limits based on documentation/needs
+    # resources:
+    #   requests:
+    #     memory: "1Gi"
+    #     cpu: "0.5"
+
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agent_app
+    restart: unless-stopped
+    depends_on:
+       cloud-sql-proxy: # Ensure proxy starts before the agent attempts connection
+         condition: service_started # Basic check, may need healthcheck on proxy for robustness
+    ports:
+      - "8080:8080"
+    environment:
+      # === Environment Type ===
+      # Use 'production-local' for Docker Compose setup with proxy
+      ENVIRONMENT: production-local
+
+      # === Production Database Configuration (Used by production-local and production) ===
+      # Values should ideally come from a secure source (like .env file or Secret Manager)
+      # For production-local, these are used to connect THROUGH the proxy
+      # For production (Cloud Run), these are used to connect via Unix Socket
+      DB_USER: ${DB_USER:-agent_user} # Example: Use env var or default
+      DB_PASSWORD: ${DB_PASSWORD:-password} # Example: Use env var or default (CHANGE THIS!)
+      DB_NAME: ${DB_NAME:-main_db} # Example: Use env var or default
+      DB_INSTANCE_CONNECTION_NAME: ${DB_INSTANCE_CONNECTION_NAME:-poc-ai-agents-project:us-central1:main-instance} # Used by production and maybe proxy logging
+
+      # === SSL Secrets Configuration (REMOVED - Not needed when connecting via proxy) ===
+      # DB_SSL_SERVER_CA_SECRET: "..."
+      # DB_SSL_CLIENT_CERT_SECRET: "..."
+      # DB_SSL_CLIENT_KEY_SECRET: "..."
+
+      # === Google Cloud Configuration ===
+      GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT:-poc-ai-agents-project}
+      GOOGLE_CLOUD_LOCATION: ${GOOGLE_CLOUD_LOCATION:-us-central1}
+      GOOGLE_GENAI_USE_VERTEXAI: ${GOOGLE_GENAI_USE_VERTEXAI:-True}
+      # GOOGLE_APPLICATION_CREDENTIALS: "/credentials/key.json" # Use SA assigned to Cloud Run OR mounted key for local
+
+      # === API Keys ===
+      TICKETMASTER_API_KEY: ${TICKETMASTER_API_KEY:-your_tk_key}
+      GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY:-your_maps_key}
+
+      # === Web UI Configuration ===
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-*,http://localhost,http://localhost:8080}
+      SERVE_WEB_INTERFACE: ${SERVE_WEB_INTERFACE:-True}
+
+    volumes:
+      # Mount ADC credentials ONLY IF NEEDED (e.g., proxy not using them directly, or other gcloud calls)
+      # If proxy uses them, this might not be needed for the agent itself unless other GCP services are called
+      - /Users/seberino/.config/gcloud/application_default_credentials.json:/credentials/key.json:ro
+    networks:
+      - agent-network
+
+# Removed postgres_data volume as the db service is removed
+# volumes:
+#  postgres_data:
+
+networks:
+  agent-network: # Define the custom bridge network
+    driver: bridge 
