@@ -8,12 +8,20 @@ import requests
 from dotenv import load_dotenv
 from google.adk.tools import agent_tool
 from .google_search_agent.agent import google_search_agent
-from .google_maps_agent.agent import get_agent_async as get_google_maps_agent_async
 import asyncio
+import contextlib # Needed for AsyncExitStack
+import googlemaps # Add googlemaps import
 
 # Load environment variables from root directory
-root_dir = Path(__file__).resolve().parent.parent
-load_dotenv(root_dir / '.env')
+root_dir = Path(__file__).resolve().parent.parent.parent # Go up one more level
+is_dotenv_loaded = load_dotenv(root_dir / '.env')
+# Remove the strict check - load_dotenv can fail gracefully if vars are set elsewhere
+# if not is_dotenv_loaded:
+#    raise ValueError("Failed to load .env file")
+
+# print(f"IS VERTEX AI ENABLED: {os.getenv('GOOGLE_GENAI_USE_VERTEXAI')}") # Remove diagnostic print
+# Initialize Google Maps client
+gmaps = googlemaps.Client(key=os.getenv('GOOGLE_MAPS_API_KEY'))
 
 # Google Maps Weather API configuration
 WEATHER_API_KEY = os.getenv('GOOGLE_MAPS_API_KEY')
@@ -475,13 +483,78 @@ async def get_events(category: Optional[str] = None, start_date: Optional[str] =
             "error_message": f"Error getting events data: {str(e)}"
         }
 
-async def initialize_agent():
-    """Initializes all agents, including the async ones."""
-    # Capture both the agent and the exit_stack
-    google_maps_agent, maps_exit_stack = await get_google_maps_agent_async()
+async def ask_google_maps(query: str) -> dict:
+    """
+    Searches for places or addresses in Las Vegas using the Google Maps API.
+    Use this tool to find details about venues, restaurants, addresses,
+    or other points of interest in Las Vegas.
 
-    # Define the root agent *inside* this async function
-    agent_instance = Agent(
+    Args:
+        query: The search query (e.g., 'Bellagio fountains', 'address of AREA15').
+
+    Returns:
+        A dictionary containing the search results or an error message.
+    """
+    try:
+        # Use Google Maps Places API (Text Search)
+        # Bias results towards Las Vegas using the location parameter
+        places_result = gmaps.places(
+            query=query,
+            location=(VEGAS_LOCATION["lat"], VEGAS_LOCATION["lng"]),
+            radius=30000 # Search within a 30km radius of central Vegas
+        )
+
+        if places_result.get('status') == 'OK' and places_result.get('results'):
+            results = []
+            for place in places_result['results'][:3]: # Return top 3 results
+                place_details = {
+                    "name": place.get('name'),
+                    "address": place.get('formatted_address'),
+                    "rating": place.get('rating'),
+                    "total_ratings": place.get('user_ratings_total'),
+                    "types": place.get('types')
+                }
+                # Optionally get opening hours (requires another API call - Places Details)
+                # Consider adding this if needed, but be mindful of quota usage.
+                # details = gmaps.place(place_id=place['place_id'], fields=['opening_hours'])
+                # if details.get('result') and details['result'].get('opening_hours'):
+                #    place_details['opening_hours'] = details['result']['opening_hours'].get('weekday_text')
+                results.append(place_details)
+            
+            report = f"🗺️ Found these places matching '{query}' in Las Vegas:\n"
+            for i, res in enumerate(results):
+                report += f"\n{i+1}. {res['name']}\n"
+                report += f"   📍 Address: {res['address']}\n"
+                if res['rating']:
+                    report += f"   ⭐ Rating: {res['rating']} ({res.get('total_ratings', 'N/A')} reviews)\n"
+                # if res.get('opening_hours'):
+                #    report += f"   🕒 Hours: {'; '.join(res['opening_hours'])}\n"
+            
+            return {
+                "status": "success",
+                "results": results,
+                "report": report
+            }
+        elif places_result.get('status') == 'ZERO_RESULTS':
+            return {
+                "status": "success",
+                "results": [],
+                "report": f"🤷 No places found matching '{query}' in Las Vegas."
+            }
+        else:
+            return {
+                "status": "error",
+                "error_message": f"Google Maps API error: {places_result.get('status')}"
+            }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "error_message": f"Error calling Google Maps API: {str(e)}"
+        }
+
+# --- Define root_agent synchronously ---
+root_agent = Agent(
         name="vegas_events_agent",
         model="gemini-2.0-flash",
         description=(
@@ -507,11 +580,17 @@ async def initialize_agent():
             "   - Time-flexible search ('tonight', 'this weekend')\n"
             "   - Venue-specific event lookup\n"
             "   - Price and availability tracking\n\n"
-            "5. Location Services:\n"
-            "   - Venue information via Google Maps\n"
+        "5. Location Services (ask_google_maps):\n"
+        "   - Venue information lookup\n"
             "   - Distance and travel time estimation\n"
             "   - Area-specific event recommendations\n"
-            "   - Parking and accessibility information"
+        "   - Add relevant venue information (using ask_google_maps if needed)\n"
+        "   - Suggest alternatives when needed\n\n"
+        "6. Additional Considerations:\n"
+        "   - Use ask_google_maps for venue details and travel planning\n"
+        "   - Include backup options for weather changes\n"
+        "   - Consider crowd levels at different times\n"
+        "   - Check for special events or holidays"
         ),
         instruction=(
             "Follow this systematic approach for event recommendations:\n\n"
@@ -552,26 +631,19 @@ async def initialize_agent():
             "   - Lead with weather-appropriate suggestions\n"
             "   - Group events by time and category\n"
             "   - Include pricing and booking details\n"
-            "   - Add relevant venue information\n"
+        "   - Add relevant venue information (using ask_google_maps if needed)\n"
             "   - Suggest alternatives when needed\n\n"
             "6. Additional Considerations:\n"
-            "   - Use Google Maps for venue details and travel planning\n"
+        "   - Use ask_google_maps for venue details and travel planning\n"
             "   - Include backup options for weather changes\n"
             "   - Consider crowd levels at different times\n"
             "   - Check for special events or holidays"
         ),
         tools=[
             agent_tool.AgentTool(agent=google_search_agent),
-            agent_tool.AgentTool(agent=google_maps_agent),
+        ask_google_maps,
             get_time,
             get_weather,
             get_events
         ],
     )
-    # Return the root agent instance and the exit_stack
-    # Note: If other tools/agents also needed async init with exit_stacks,
-    # they would need to be combined here (e.g., using contextlib.AsyncExitStack)
-    return agent_instance, maps_exit_stack
-
-# Assign the coroutine object directly. ADK might await this during loading.
-root_agent = initialize_agent() 

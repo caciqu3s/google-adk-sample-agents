@@ -1,139 +1,107 @@
 #!/bin/bash
 
 # --- Configuration ---
-# Default .env file path (can be overridden by the second argument)
-DEFAULT_ENV_FILE=".env"
+# Default deploy.json file path (can be overridden by the first argument)
+DEFAULT_DEPLOY_JSON="agents/deploy.json"
 
 # --- Helper Functions ---
 print_usage() {
-  echo "Usage: $0 <gcp_project_id> [path_to_env_file]"
-  echo "  <gcp_project_id>: Your Google Cloud Project ID."
-  echo "  [path_to_env_file]: Optional path to the .env file (defaults to './.env')."
+  echo "Usage: $0 [path_to_deploy_json]"
+  echo "  [path_to_deploy_json]: Optional path to the deploy.json file (defaults to './agents/deploy.json')."
   echo
-  echo "This script reads key-value pairs from the specified .env file and creates"
-  echo "or updates corresponding secrets in Google Cloud Secret Manager."
-  echo "Variable names are converted to lowercase and underscores replaced with hyphens"
-  echo "to form the Secret ID (e.g., MY_API_KEY becomes my-api-key)."
+  echo "This script reads secret definitions from the specified deploy.json file,"
+  echo "fetches the corresponding secret values from Google Cloud Secret Manager"
+  echo "using the currently configured gcloud project, and outputs 'export' commands."
+  echo "To use, run: source <(./manage_secrets.sh)"
 }
 
 # --- Argument Parsing ---
-if [[ -z "$1" ]]; then
-  echo "Error: Google Cloud Project ID is required."
-  print_usage
-  exit 1
-fi
-
-PROJECT_ID="$1"
-ENV_FILE="${2:-$DEFAULT_ENV_FILE}"
+# Project ID is now determined automatically
+DEPLOY_JSON_FILE="${1:-$DEFAULT_DEPLOY_JSON}" # deploy.json path is now the first optional arg
 
 # --- Pre-checks ---
 if ! command -v gcloud &> /dev/null; then
-    echo "Error: gcloud command not found. Please install the Google Cloud SDK."
+    echo "Error: gcloud command not found. Please install the Google Cloud SDK." >&2
     exit 1
 fi
 
-if [[ ! -f "$ENV_FILE" ]]; then
-  echo "Error: Environment file not found at '$ENV_FILE'"
+if ! command -v jq &> /dev/null; then
+    echo "Error: jq command not found. Please install jq (e.g., 'brew install jq' or 'sudo apt-get install jq')." >&2
+    exit 1
+fi
+
+# Get current gcloud project config
+PROJECT_ID=$(gcloud config get-value project 2>/dev/null)
+if [[ -z "$PROJECT_ID" ]]; then
+  echo "Error: No active GCP project configured in gcloud." >&2
+  echo "Please run 'gcloud config set project YOUR_PROJECT_ID'" >&2
   exit 1
 fi
 
-echo "--------------------------------------------------"
-echo "Starting Secret Manager Sync"
-echo "Project ID: $PROJECT_ID"
-echo "Using .env file: $ENV_FILE"
-echo "--------------------------------------------------"
-echo
+if [[ ! -f "$DEPLOY_JSON_FILE" ]]; then
+  echo "Error: Deployment config file not found at '$DEPLOY_JSON_FILE'" >&2
+  exit 1
+fi
+
+echo "# Starting Secret Fetch for Local Environment" >&2
+echo "# Auto-detected Project ID: $PROJECT_ID" >&2
+echo "# Using deploy.json: $DEPLOY_JSON_FILE" >&2
+echo "# Run 'source <(./manage_secrets.sh)' to load secrets." >&2
+echo >&2 # Add a newline to stderr for separation
 
 # --- Main Logic ---
 processed_count=0
-skipped_count=0
 error_count=0
 
-# Read the .env file line by line
-# Handle lines that might not end with a newline
-while IFS= read -r line || [[ -n "$line" ]]; do
-  # Trim leading/trailing whitespace
-  trimmed_line=$(echo "$line" | xargs)
+# Read the env_vars array using jq
+env_vars_json=$(jq -c '.env_vars // []' "$DEPLOY_JSON_FILE")
 
-  # Skip empty lines and comments
-  if [[ -z "$trimmed_line" ]] || [[ "$trimmed_line" == \#* ]]; then
-    continue
-  fi
+# Check if jq succeeded and env_vars_json is not empty/null
+if [ -z "$env_vars_json" ] || [ "$env_vars_json" = "null" ] || [ "$env_vars_json" = "[]" ]; then
+  echo "Warning: No 'env_vars' array found or array is empty in '$DEPLOY_JSON_FILE'." >&2
+  exit 0 # Exit successfully as there's nothing to process
+fi
 
-  # Ensure line contains '='
-  if [[ "$trimmed_line" != *"="* ]]; then
-    echo "Warning: Skipping malformed line (no '=' found): $trimmed_line"
-    ((skipped_count++))
-    continue
-  fi
+# Use Process Substitution to feed the while loop, avoiding a subshell
+while IFS= read -r item_json; do
+  # Check if the item defines a secret
+  if [[ $(echo "$item_json" | jq 'has("secret")') == "true" ]]; then
+    var_name=$(echo "$item_json" | jq -r '.name // ""')
+    secret_id=$(echo "$item_json" | jq -r '.secret // ""')
+    secret_version=$(echo "$item_json" | jq -r '.version // "latest"')
 
-  # Split KEY and VALUE (handles values potentially containing '=')
-  KEY="${trimmed_line%%=*}"
-  VALUE="${trimmed_line#*=}"
-
-  # Basic validation
-  if [[ -z "$KEY" ]]; then
-    echo "Warning: Skipping line with empty key: $trimmed_line"
-    ((skipped_count++))
-    continue
-  fi
-  # Allow empty values, as they might be valid secrets
-
-  # Convert KEY to a valid Secret Manager ID format
-  # Rules: lowercase letters, numbers, hyphens. Max 255 chars.
-  SECRET_ID=$(echo "$KEY" | tr '[:upper:]' '[:lower:]' | tr '_.' '-' | sed 's/[^a-z0-9-]//g' | cut -c1-255)
-
-  if [[ -z "$SECRET_ID" ]]; then
-      echo "Warning: Could not generate a valid Secret ID from key '$KEY'. Skipping."
-      ((skipped_count++))
+    if [[ -z "$var_name" ]] || [[ -z "$secret_id" ]]; then
+      echo "Warning: Skipping secret entry with missing name or secret ID in '$DEPLOY_JSON_FILE': $item_json" >&2
       continue
-  fi
-
-  echo "Processing: Variable '$KEY' => Secret ID '$SECRET_ID'"
-
-  # --- Check if secret exists ---
-  if ! gcloud secrets describe "$SECRET_ID" --project="$PROJECT_ID" --quiet > /dev/null 2>&1; then
-    # --- Create Secret ---
-    echo "  Secret '$SECRET_ID' not found. Creating..."
-    if gcloud secrets create "$SECRET_ID" \
-        --project="$PROJECT_ID" \
-        --replication-policy="automatic" \
-        --labels=managed-by=env-script; then
-      echo "  SUCCESS: Secret '$SECRET_ID' created."
-    else
-      echo "  ERROR: Failed to create secret '$SECRET_ID'. Check permissions or secret name validity. Skipping."
-      ((error_count++))
-      continue # Skip adding version if creation failed
     fi
-  else
-    echo "  Secret '$SECRET_ID' already exists. Updating labels (if needed) and adding new version."
-     # Optionally update labels on existing secrets
-     gcloud secrets update "$SECRET_ID" --project="$PROJECT_ID" --update-labels=managed-by=env-script --remove-labels="" > /dev/null 2>&1 || echo "  Warning: Failed to update labels for existing secret '$SECRET_ID'."
-  fi
 
-  # --- Add Secret Version ---
-  echo "  Adding new version for secret '$SECRET_ID'..."
-  # Use process substitution <(...) to avoid issues with complex values in echo
-  if gcloud secrets versions add "$SECRET_ID" \
-      --project="$PROJECT_ID" \
-      --data-file=- < <(echo -n "$VALUE"); then
-    echo "  SUCCESS: New version added for '$SECRET_ID'."
-    ((processed_count++))
-  else
-    echo "  ERROR: Failed to add version for secret '$SECRET_ID'. Check permissions."
-     ((error_count++))
-  fi
-  echo # Blank line for readability
+    echo "# Fetching secret for variable: $var_name (Secret ID: $secret_id, Version: $secret_version)" >&2
 
-done < "$ENV_FILE"
+    # Construct full secret resource name
+    secret_resource_name="projects/$PROJECT_ID/secrets/$secret_id/versions/$secret_version"
+
+    # Fetch the secret value
+    secret_value=$(gcloud secrets versions access "$secret_resource_name" --project="$PROJECT_ID" --quiet 2> /dev/null)
+
+    # Check gcloud exit status
+    if [[ $? -ne 0 ]]; then
+      echo "Error: Failed to fetch secret '$secret_resource_name'. Check permissions or if the secret/version exists." >&2
+      ((error_count++))
+      continue # Skip this secret
+    else
+      # Output the export command
+      # Use printf for safer handling of potentially complex secret values
+      printf "export %s=%q\n" "$var_name" "$secret_value"
+      ((processed_count++))
+    fi
+  fi
+done < <(echo "$env_vars_json" | jq -c '.[]') # Feed the loop using Process Substitution
 
 # --- Summary ---
-echo "--------------------------------------------------"
-echo "Secret Manager Sync Complete"
-echo "  Processed successfully: $processed_count"
-echo "  Skipped lines: $skipped_count"
-echo "  Errors encountered: $error_count"
-echo "--------------------------------------------------"
+echo >&2 # Add a newline to stderr
+echo "# Secret Fetch Complete" >&2
+echo "#   Variables to be exported: $processed_count" >&2
+echo "#   Errors encountered: $error_count" >&2
 
 # Exit with error code if any errors occurred
 if [[ $error_count -gt 0 ]]; then

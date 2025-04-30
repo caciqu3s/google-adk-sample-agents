@@ -46,5 +46,5 @@ async def get_agent_async():
       instruction='Help user with mapping and directions using available tools.',
       tools=tools,
   )
-  # Return both the agent and the exit_stack
-  return google_maps_agent, exit_stack
+  # Return the agent
+  return google_maps_agent

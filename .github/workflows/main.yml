@@ -224,6 +224,7 @@ jobs:
            # Initialize ENV_VARS string only with Project and Location
            ENV_VARS="GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}"
            ENV_VARS+=",GOOGLE_CLOUD_LOCATION=$GOOGLE_CLOUD_LOCATION"
+           ENV_VARS+=",ENVIRONMENT=production"
            SECRET_VARS=""
  
            # Process env vars defined in the config
@@ -232,7 +233,6 @@ jobs:
            # Use process substitution and mapfile for safer parsing
            mapfile -t env_items < <(echo "$env_vars_json" | jq -c '.[]')
  
-           first_env=true
            first_secret=true
            for item_json in "${env_items[@]}"; do
              var_name=$(echo "$item_json" | jq -r '.name')
@@ -240,30 +240,29 @@ jobs:
              secret_name=$(echo "$item_json" | jq -r '.secret // ""' )
              secret_version=$(echo "$item_json" | jq -r '.version // "latest"')
  
+             # Skip vars that are set implicitly/manually or not needed for connector
+             if [[ "$var_name" == "ENVIRONMENT" || \
+                   "$var_name" == "GOOGLE_CLOUD_PROJECT" || \
+                   "$var_name" == "GOOGLE_CLOUD_LOCATION" ]]; then
+               continue
+             fi
+ 
              if [ -n "$secret_name" ]; then
                # It's a secret reference - add to SECRET_VARS
+               # For connector, only DB_PASSWORD should be a secret typically
                if [ "$first_secret" = true ]; then
                  SECRET_VARS+="$var_name=$secret_name:$secret_version"
                  first_secret=false
                else
                  SECRET_VARS+=",$var_name=$secret_name:$secret_version"
                fi
-             elif [ -n "$plain_value" ] || [ "$var_name" = "DB_INSTANCE_CONNECTION_NAME" ]; then # Include placeholder
-               # It's a plain value or the placeholder - add to ENV_VARS
+             elif [ -n "$plain_value" ]; then
+               # It's a plain value - add to ENV_VARS
+               # Need DB_USER, DB_NAME, DB_INSTANCE_CONNECTION_NAME for connector
                quoted_value=$(printf '%q' "$plain_value")
-               if [ "$first_env" = true ]; then
-                  # Already added project/location
-                  first_env=false
-               fi
                ENV_VARS+=",$var_name=$quoted_value"
              fi
            done
- 
-           # Replace the placeholder with the actual constructed value
-           ENV_VARS=${ENV_VARS//__INSTANCE_CONNECTION_NAME_PLACEHOLDER__/$DB_INSTANCE_CONNECTION_NAME}
- 
-           # Construct the full image tag
-           # IMAGE_TAG="${GOOGLE_CLOUD_LOCATION}-docker.pkg.dev/${GOOGLE_CLOUD_PROJECT}/${REPO_NAME}/${IMAGE_NAME}:${{ github.sha }}"
  
            # Build the gcloud deploy command
            deploy_cmd="gcloud run deploy \"$SERVICE_NAME\""
@@ -272,14 +271,13 @@ jobs:
            deploy_cmd+=" --region \"$GOOGLE_CLOUD_LOCATION\""
            # Add Service Account if specified
            if [ -n "$SERVICE_ACCOUNT" ]; then
-              # Ensure SA email is quoted properly if it contains special chars (less likely for email)
               quoted_sa=$(printf '%q' "$SERVICE_ACCOUNT")
               deploy_cmd+=" --service-account=$quoted_sa"
            fi
            # Escape the ENV_VARS string for safe inclusion in the command
-           if [[ -n "$ENV_VARS" && "$ENV_VARS" != "GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT},GOOGLE_CLOUD_LOCATION=$GOOGLE_CLOUD_LOCATION" ]]; then # Check if non-default vars were added
-              escaped_env_vars=$(printf '%q' "$ENV_VARS")
-              deploy_cmd+=" --set-env-vars=$escaped_env_vars"
+           if [ -n "$ENV_VARS" ]; then
+               escaped_env_vars=$(printf '%q' "$ENV_VARS")
+               deploy_cmd+=" --set-env-vars=$escaped_env_vars"
            fi
            # Add secrets if any were found
            if [ -n "$SECRET_VARS" ]; then
