@@ -224,7 +224,9 @@ jobs:
            # Initialize ENV_VARS string only with Project and Location
            ENV_VARS="GOOGLE_CLOUD_PROJECT=${GOOGLE_CLOUD_PROJECT}"
            ENV_VARS+=",GOOGLE_CLOUD_LOCATION=$GOOGLE_CLOUD_LOCATION"
-           ENV_VARS+=",ENVIRONMENT=production"
+           ENV_VARS+=",ENVIRONMENT=production" # Hardcode environment for Cloud Run
+           # Add DB_INSTANCE_CONNECTION_NAME as a plain env var as the app needs it
+           ENV_VARS+=",DB_INSTANCE_CONNECTION_NAME=$DB_INSTANCE_CONNECTION_NAME"
            SECRET_VARS=""
  
            # Process env vars defined in the config
@@ -284,6 +286,8 @@ jobs:
               escaped_secret_vars=$(printf '%q' "$SECRET_VARS")
               deploy_cmd+=" --set-secrets=$escaped_secret_vars"
            fi
+           # Add the Cloud SQL instance connection flag
+           deploy_cmd+=" --set-cloudsql-instances=$DB_INSTANCE_CONNECTION_NAME"
            deploy_cmd+=" --platform managed"
 
            # Handle Invocation Permissions

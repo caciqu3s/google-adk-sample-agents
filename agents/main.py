@@ -2,9 +2,6 @@ import os
 import urllib.parse
 import sqlalchemy # Keep for potential type hints
 
-# No Cloud SQL Connector imports needed for this approach
-# from google.cloud.sql.connector import Connector, IPTypes
-
 import uvicorn
 from fastapi import FastAPI
 from google.adk.cli.fast_api import get_fast_api_app
