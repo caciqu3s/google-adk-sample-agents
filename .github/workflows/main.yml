@@ -290,6 +290,9 @@ jobs:
            deploy_cmd+=" --set-cloudsql-instances=$DB_INSTANCE_CONNECTION_NAME"
            deploy_cmd+=" --platform managed"
 
+           # Enable CPU Boost
+           deploy_cmd+=" --cpu-boost"
+
            # Handle Invocation Permissions
            if [ "$ALLOW_UNAUTH" = "true" ]; then
              deploy_cmd+=" --allow-unauthenticated"

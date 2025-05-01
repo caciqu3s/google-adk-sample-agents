@@ -641,7 +641,7 @@ root_agent = Agent(
         ),
         tools=[
             agent_tool.AgentTool(agent=google_search_agent),
-        ask_google_maps,
+            ask_google_maps,
             get_time,
             get_weather,
             get_events
